@@ -68,14 +68,16 @@ def _make_cloud_sql_engine():
     """
     from google.cloud.sql.connector import IPTypes, create_async_connector
 
-    instance = os.environ["INSTANCE_CONNECTION_NAME"]
-    db_name = os.environ.get("CLOUD_SQL_DB") or os.environ.get("PGDATABASE")
-    user = os.environ.get("CLOUD_SQL_USER") or os.environ.get("PGUSER")
-    password = os.environ.get("CLOUD_SQL_PASSWORD") or os.environ.get("PGPASSWORD")
-    if not db_name or not user:
+    instance = config.instance_connection_name()
+    db_name = config.cloud_sql_db()
+    user = config.cloud_sql_user()
+    password = config.cloud_sql_password()
+    if not instance or not db_name or not user:
         raise RuntimeError(
-            "Cloud SQL is configured (INSTANCE_CONNECTION_NAME set) but "
-            "CLOUD_SQL_DB and CLOUD_SQL_USER are required."
+            "Cloud SQL is configured (INSTANCE_CONNECTION_NAME / "
+            "CLOUD_SQL_CONNECTION_NAME set) but a database name "
+            "(CLOUD_SQL_DB / DB_NAME) and user (CLOUD_SQL_USER / DB_USER) "
+            "are required."
         )
     iam_auth = config.cloud_sql_iam_auth()
     ip_type = IPTypes.PRIVATE if config.cloud_sql_private_ip() else IPTypes.PUBLIC
