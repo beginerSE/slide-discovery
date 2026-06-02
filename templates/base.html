@@ -1,0 +1,61 @@
+{% import "_macros.html" as m %}
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}提案スライド検索{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}" />
+  <script src="{{ url_for('static', path='htmx.min.js') }}" defer></script>
+  <script src="{{ url_for('static', path='app.js') }}" defer></script>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <a href="/" class="brand">{{ m.icon("presentation") }}<span>提案スライド検索</span></a>
+      </div>
+      <nav class="sidebar-content">
+        <div class="nav-label">メニュー</div>
+        <a href="/" class="nav-item {% if active_nav == '/' %}active{% endif %}">{{ m.icon("search") }}<span>スライド検索</span></a>
+        {% if user and (user.role == 'admin' or user.canUpload) %}
+        <a href="/contribute" class="nav-item {% if active_nav == '/contribute' %}active{% endif %}">{{ m.icon("link") }}<span>リンク追加</span></a>
+        {% endif %}
+        {% if user and user.role == 'admin' %}
+        <a href="/admin" class="nav-item {% if active_nav == '/admin' %}active{% endif %}">{{ m.icon("cloud") }}<span>取り込み管理</span></a>
+        <a href="/admin/files" class="nav-item {% if active_nav == '/admin/files' %}active{% endif %}">{{ m.icon("files") }}<span>ファイル管理</span></a>
+        <a href="/admin/slides" class="nav-item {% if active_nav == '/admin/slides' %}active{% endif %}">{{ m.icon("list-checks") }}<span>メタデータ管理</span></a>
+        <a href="/admin/users" class="nav-item {% if active_nav == '/admin/users' %}active{% endif %}">{{ m.icon("user") }}<span>ユーザー管理</span></a>
+        <a href="/admin/logs" class="nav-item {% if active_nav == '/admin/logs' %}active{% endif %}">{{ m.icon("layers") }}<span>追加履歴</span></a>
+        {% endif %}
+      </nav>
+      <div class="sidebar-footer">
+        {% if user %}
+        <div class="user-chip">
+          <div class="user-avatar">{{ m.icon("user", "icon") }}</div>
+          <div class="user-meta">
+            <div class="user-name">{{ user.displayName or user.email }}</div>
+            <div class="user-role">{{ "管理者" if user.role == 'admin' else "一般ユーザー" }}</div>
+          </div>
+          <form method="post" action="/logout">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button class="btn btn-ghost btn-icon" title="ログアウト" type="submit">{{ m.icon("log-out") }}</button>
+          </form>
+        </div>
+        {% else %}
+        <a href="/login" class="nav-item">{{ m.icon("log-in") }}<span>ログイン</span></a>
+        {% endif %}
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <span>提案スライド検索</span>
+      </header>
+      <main class="content">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+</body>
+</html>

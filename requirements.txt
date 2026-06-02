@@ -1,0 +1,21 @@
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+sqlalchemy
+asyncpg
+pgvector
+httpx
+apscheduler
+bcrypt
+itsdangerous
+pillow
+python-pptx
+psycopg2-binary
+# Google / GCP-native production backends (ADC):
+#   Cloud SQL connection, Vertex AI (Gemini), Drive API ingest.
+google-genai
+google-auth
+google-api-python-client
+google-auth-httplib2
+cloud-sql-python-connector[asyncpg]
