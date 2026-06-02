@@ -79,9 +79,15 @@ def _make_cloud_sql_engine():
     iam_auth = config.cloud_sql_iam_auth()
     ip_type = IPTypes.PRIVATE if config.cloud_sql_private_ip() else IPTypes.PUBLIC
 
-    connector = Connector(refresh_strategy="lazy")
+    connector: "Connector | None" = None
 
     async def getconn():
+        # The Cloud SQL Connector binds to the event loop it is created on, so
+        # it must be instantiated inside the running (uvicorn) loop — not at
+        # import time, which raises ConnectorLoopError on the first request.
+        nonlocal connector
+        if connector is None:
+            connector = Connector(refresh_strategy="lazy")
         kwargs: dict = {
             "user": user,
             "db": db_name,
