@@ -1,0 +1,10 @@
+{% if files|length == 0 %}
+<div class="text-sm text-muted" style="text-align:center;padding:3rem 0">
+  {% if total_files == 0 %}管理対象のファイルがありません。スライドを取り込むと表示されます。{% else %}該当するファイルがありません。{% endif %}
+</div>
+{% else %}
+<div class="space-y">
+  <div class="text-xs text-muted">{{ files|length }} 件のファイル</div>
+  {% for file in files %}{% include "_file_card.html" %}{% endfor %}
+</div>
+{% endif %}

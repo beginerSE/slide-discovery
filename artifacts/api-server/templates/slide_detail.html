@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}{{ slide.slideTitle or "スライド" }} — 提案スライド検索{% endblock %}
+{% block content %}
+<div class="stack wrap-7xl" style="gap:1.5rem;padding-bottom:3rem">
+  <div class="row" style="align-items:flex-start;justify-content:space-between;gap:1rem">
+    <div>
+      <a href="/" class="btn btn-ghost btn-sm" style="margin-bottom:0.5rem;margin-left:-0.5rem">{{ m.icon("arrow-left") }}戻る</a>
+      <h1 style="font-size:1.5rem;font-weight:700;line-height:1.3;margin-bottom:0.5rem">{{ slide.slideTitle or "無題のスライド" }}</h1>
+      <div class="row wrap gap-2">
+        {% if slide.industry %}<span class="badge">{{ slide.industry }}</span>{% endif %}
+        {% if slide.client %}<span class="badge">{{ slide.client }}</span>{% endif %}
+        {% if slide.proposalType %}<span class="badge badge-outline">{{ slide.proposalType }}</span>{% endif %}
+        {% if slide.graphType %}<span class="badge badge-outline">{{ slide.graphType }}</span>{% endif %}
+        {% if slide.layoutType %}<span class="badge badge-outline">{{ slide.layoutType }}</span>{% endif %}
+      </div>
+    </div>
+    {% if slide.sourceUrl %}
+    <a href="{{ slide.sourceUrl }}" target="_blank" rel="noopener noreferrer" class="btn shrink-0">{{ m.icon("external-link") }}元資料を開く</a>
+    {% endif %}
+  </div>
+
+  <div class="detail-grid">
+    <div class="stack" style="gap:1.5rem">
+      <div class="detail-preview">
+        {% if slide.thumbnailPath %}
+        <img src="{{ slide.thumbnailPath }}" alt="{{ slide.slideTitle }}" />
+        {% else %}
+        <div class="stack" style="align-items:center;color:hsl(var(--muted-foreground))">{{ m.icon("presentation", "icon-lg") }}<p class="mt-2">プレビュー画像がありません</p></div>
+        {% endif %}
+      </div>
+
+      <div class="two-col">
+        <div class="card card-body">
+          <div class="row gap-2 text-sm font-semibold mb-2" style="gap:0.4rem;color:hsl(var(--foreground))">{{ m.icon("file-text", "icon") }}<span class="text-primary">概要</span></div>
+          <p class="prose">{{ slide.summary or "概要情報はありません。" }}</p>
+        </div>
+        <div class="card card-body" style="background:hsl(var(--primary)/0.05);border-color:hsl(var(--primary)/0.1)">
+          <div class="row gap-2 text-sm font-semibold mb-2 text-primary" style="gap:0.4rem">{{ m.icon("sparkles", "icon") }}<span>再利用ヒント</span></div>
+          <p class="prose" style="color:hsl(var(--primary)/0.85)">{{ slide.reuseHint or "再利用に関するヒントは登録されていません。" }}</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="stack" style="gap:1.5rem">
+      <div class="card">
+        <div class="card-header"><div class="text-sm font-bold">基本情報</div></div>
+        <div>
+          <div class="info-row"><span class="k">{{ m.icon("file-text") }}ファイル名</span><span class="v" title="{{ slide.fileName }}">{{ slide.fileName }}</span></div>
+          {% if slide.client %}<div class="info-row"><span class="k">{{ m.icon("building") }}クライアント先</span><span class="v" title="{{ slide.client }}">{{ slide.client }}</span></div>{% endif %}
+          <div class="info-row"><span class="k">{{ m.icon("presentation") }}ページ</span><span class="v">p.{{ slide.pageNo }}</span></div>
+          <div class="info-row"><span class="k">{{ m.icon("lock") }}アクセス権</span><span class="v">{{ slide.accessLevel }}</span></div>
+          <div class="info-row"><span class="k">{{ m.icon("calendar") }}更新日</span><span class="v">{{ slide.updatedAt[:10] | replace("-", "/") }}</span></div>
+        </div>
+      </div>
+
+      <div class="card card-body">
+        <div class="text-sm font-bold mb-2">タグ</div>
+        <div class="row wrap gap-2">
+          {% if slide.tags %}{% for t in slide.tags %}<span class="badge">#{{ t }}</span>{% endfor %}
+          {% else %}<span class="text-muted text-sm">タグなし</span>{% endif %}
+        </div>
+      </div>
+
+      {% if slide.slideText %}
+      <div class="card card-body">
+        <div class="text-sm font-bold mb-2">抽出テキスト</div>
+        <div class="text-xs text-muted" style="background:hsl(var(--muted)/0.3);padding:0.75rem;border-radius:var(--radius);border:1px solid hsl(var(--muted));max-height:11rem;overflow:hidden">{{ slide.slideText }}</div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div style="margin-top:1rem;padding-top:2rem;border-top:1px solid hsl(var(--border))">
+    <h2 class="section-title">{{ m.icon("layers", "icon-lg") }}類似するスライド</h2>
+    {% if similar %}
+    <div class="slide-grid">
+      {% for slide in similar %}{% set sim_pct = (slide.similarityScore * 100) | round | int %}{% include "_slide_card.html" %}{% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state"><p class="text-muted">類似するスライドは見つかりませんでした。</p></div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,44 @@
+{% import "_macros.html" as m %}
+{% set status_map = {
+  "pending": ("未取り込み", "badge-outline", "calendar"),
+  "processing": ("処理中", "badge", "loader"),
+  "ready": ("取り込み済み", "badge-primary", "check"),
+  "failed": ("失敗", "badge-destructive", "alert")
+} %}
+<div class="card">
+  <div class="card-header"><div class="text-sm font-semibold">登録済みファイル（{{ files|length }}）</div></div>
+  <div class="card-body">
+    {% if files|length == 0 %}
+    <p class="text-sm text-muted" style="text-align:center;padding:2rem 0">まだ登録されたファイルはありません。上のフォームから共有リンクを追加してください。</p>
+    {% else %}
+    <div>
+      {% for f in files %}
+      {% set st = status_map.get(f.status, status_map["pending"]) %}
+      <div class="file-row">
+        {{ m.icon("file-text", "ficon") }}
+        <div class="flex-1">
+          <div class="row wrap gap-2">
+            <span class="file-name" title="{{ f.fileName or f.driveFileId }}">{{ f.fileName or f.driveFileId }}</span>
+            <span class="badge {{ st[1] }}">{{ m.icon("loader", "spin") if f.status == "processing" else m.icon(st[2]) }}{{ st[0] }}</span>
+            {% if f.slideCount and f.slideCount > 0 %}<span class="badge badge-outline">{{ f.slideCount }} スライド</span>{% endif %}
+          </div>
+          <div class="file-meta">
+            <a href="{{ f.shareUrl }}" target="_blank" rel="noopener noreferrer" class="row gap-2">{{ m.icon("external-link") }}Drive で開く</a>
+            {% if f.lastIngestedAt %}<span>最終取込: {{ f.lastIngestedAt[:16] | replace("T", " ") | replace("-", "/") }}</span>{% endif %}
+            <span class="mono" style="opacity:0.7">{{ f.driveFileId }}</span>
+          </div>
+          {% if f.lastError %}<p class="text-xs text-destructive mt-1 truncate">⚠ {{ f.lastError }}</p>{% endif %}
+        </div>
+        <div class="row gap-2 shrink-0">
+          <button class="btn btn-ghost btn-icon" title="再取り込み" {% if is_running %}disabled{% endif %}
+            hx-post="/ui/admin/files/{{ f.id }}/retry" hx-target="#admin-files" hx-swap="innerHTML">{{ m.icon("rotate-cw") }}</button>
+          <button class="btn btn-ghost btn-icon" title="削除"
+            hx-post="/ui/admin/files/{{ f.id }}/delete" hx-target="#admin-files" hx-swap="innerHTML"
+            hx-confirm="{{ f.fileName or f.driveFileId }} と関連スライドを削除しますか？">{{ m.icon("trash", "text-destructive") }}</button>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</div>
