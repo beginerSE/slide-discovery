@@ -61,11 +61,12 @@ def _make_cloud_sql_engine():
     Authenticates with ADC. When IAM database authentication is enabled
     (the default in GCP mode) no password is used — the attached service
     account's identity is the database user. The ``Connector`` is created
-    with ``refresh_strategy="lazy"`` so it can be instantiated here at import
-    time (outside a running event loop); the actual connection is opened
-    lazily by SQLAlchemy via the async ``getconn`` creator.
+    lazily on first use via ``create_async_connector()``, which binds it to
+    the *running* event loop. A plain ``Connector()`` would instead spin up
+    its own background-thread loop, so ``connect_async`` from uvicorn's loop
+    would raise ``ConnectorLoopError`` (loop mismatch).
     """
-    from google.cloud.sql.connector import Connector, IPTypes
+    from google.cloud.sql.connector import IPTypes, create_async_connector
 
     instance = os.environ["INSTANCE_CONNECTION_NAME"]
     db_name = os.environ.get("CLOUD_SQL_DB") or os.environ.get("PGDATABASE")
@@ -79,16 +80,16 @@ def _make_cloud_sql_engine():
     iam_auth = config.cloud_sql_iam_auth()
     ip_type = IPTypes.PRIVATE if config.cloud_sql_private_ip() else IPTypes.PUBLIC
 
-    connector: "Connector | None" = None
+    connector = None
 
     async def getconn():
-        # The Cloud SQL Connector binds to the event loop it is created on, so
-        # it must be instantiated inside the running (uvicorn) loop — not at
-        # import time, which raises ConnectorLoopError on the first request.
+        # The Connector binds to the event loop it is created on. Build it via
+        # create_async_connector() on first use so it binds to the running
+        # (uvicorn) loop; a plain Connector() would create its own background
+        # loop and connect_async would then raise ConnectorLoopError.
         nonlocal connector
-        
         if connector is None:
-            connector = Connector(refresh_strategy="lazy")
+            connector = await create_async_connector(refresh_strategy="lazy")
         kwargs: dict = {
             "user": user,
             "db": db_name,
