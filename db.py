@@ -86,6 +86,7 @@ def _make_cloud_sql_engine():
         # it must be instantiated inside the running (uvicorn) loop — not at
         # import time, which raises ConnectorLoopError on the first request.
         nonlocal connector
+        
         if connector is None:
             connector = Connector(refresh_strategy="lazy")
         kwargs: dict = {
