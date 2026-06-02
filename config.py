@@ -75,20 +75,73 @@ def gcp_location() -> str:
 
 # --- Cloud SQL --------------------------------------------------------------
 
+def instance_connection_name() -> str | None:
+    """Cloud SQL instance connection name (``project:region:instance``).
+
+    Accepts ``INSTANCE_CONNECTION_NAME`` or the alias
+    ``CLOUD_SQL_CONNECTION_NAME``.
+    """
+    return (
+        os.environ.get("INSTANCE_CONNECTION_NAME")
+        or os.environ.get("CLOUD_SQL_CONNECTION_NAME")
+        or None
+    )
+
+
 def use_cloud_sql() -> bool:
     """Use the Cloud SQL Python Connector when an instance is configured."""
-    return bool(os.environ.get("INSTANCE_CONNECTION_NAME"))
+    return bool(instance_connection_name())
+
+
+def cloud_sql_db() -> str | None:
+    """Cloud SQL database name. Accepts ``CLOUD_SQL_DB`` / ``DB_NAME`` / ``PGDATABASE``."""
+    return (
+        os.environ.get("CLOUD_SQL_DB")
+        or os.environ.get("DB_NAME")
+        or os.environ.get("PGDATABASE")
+        or None
+    )
+
+
+def cloud_sql_user() -> str | None:
+    """Cloud SQL user. Accepts ``CLOUD_SQL_USER`` / ``DB_USER`` / ``PGUSER``."""
+    return (
+        os.environ.get("CLOUD_SQL_USER")
+        or os.environ.get("DB_USER")
+        or os.environ.get("PGUSER")
+        or None
+    )
+
+
+def cloud_sql_password() -> str | None:
+    """Cloud SQL password. Accepts ``CLOUD_SQL_PASSWORD`` / ``DB_PASSWORD`` / ``PGPASSWORD``."""
+    return (
+        os.environ.get("CLOUD_SQL_PASSWORD")
+        or os.environ.get("DB_PASSWORD")
+        or os.environ.get("PGPASSWORD")
+        or None
+    )
 
 
 def cloud_sql_iam_auth() -> bool:
     """IAM database authentication (ADC) instead of a password.
 
-    Defaults to ON in GCP mode (the recommended, key-less path) and OFF
-    otherwise. Set ``CLOUD_SQL_IAM_AUTH`` explicitly to override.
+    Resolution order:
+    1. ``CLOUD_SQL_IAM_AUTH`` if set explicitly wins.
+    2. If an explicit Cloud SQL password (``CLOUD_SQL_PASSWORD`` / ``DB_PASSWORD``)
+       is supplied, default to password auth (IAM off) — otherwise a password
+       set in GCP mode would be silently ignored.
+    3. Otherwise default to ON in GCP mode (the key-less ADC path) and OFF
+       elsewhere.
     """
     raw = os.environ.get("CLOUD_SQL_IAM_AUTH")
     if raw is not None:
         return _truthy(raw)
+    # An *explicit* Cloud SQL password implies password auth. PGPASSWORD is
+    # intentionally excluded — it is commonly set by generic Postgres tooling
+    # (e.g. the Replit dev DB) and must not silently flip the auth mode.
+    if os.environ.get("CLOUD_SQL_PASSWORD") or os.environ.get("DB_PASSWORD"):
+        return False
     return is_gcp()
 
 
@@ -169,13 +222,14 @@ def log_config() -> None:
     cfg = describe()
     log.info("runtime config: %s", cfg)
     if use_cloud_sql():
-        # Mirror the fallbacks used in db.py (_make_cloud_sql_engine).
-        fallbacks = {"CLOUD_SQL_DB": "PGDATABASE", "CLOUD_SQL_USER": "PGUSER"}
-        missing = [
-            k
-            for k, pg in fallbacks.items()
-            if not (os.environ.get(k) or os.environ.get(pg))
-        ]
+        # Mirror the resolution used in db.py (_make_cloud_sql_engine).
+        missing = []
+        if not cloud_sql_db():
+            missing.append("CLOUD_SQL_DB/DB_NAME")
+        if not cloud_sql_user():
+            missing.append("CLOUD_SQL_USER/DB_USER")
+        if not cloud_sql_iam_auth() and not cloud_sql_password():
+            missing.append("CLOUD_SQL_PASSWORD/DB_PASSWORD")
         if missing:
             log.warning("Cloud SQL selected but missing env: %s", ", ".join(missing))
     if use_vertex_ai() and not gcp_project():
