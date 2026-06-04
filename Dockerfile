@@ -22,4 +22,9 @@ COPY . .
 EXPOSE 8080
 
 # Cloud Run injects $PORT (defaults to 8080). Use shell form so it expands.
-CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# --proxy-headers + --forwarded-allow-ips='*' make uvicorn trust Cloud Run's
+# front-end X-Forwarded-Proto: https, so url_for() emits https:// asset links
+# (otherwise static CSS/JS are http:// and blocked as mixed content on the
+# https run.app page). Cloud Run ingress already restricts who can reach the
+# container, so trusting all forwarded IPs here is safe.
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers --forwarded-allow-ips='*'"]
