@@ -1,11 +1,12 @@
 """提案スライド検索 — FastAPI backend."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 from collections import Counter
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Optional
 
@@ -85,15 +86,53 @@ async def _seed_if_empty() -> None:
         log.info("seeded %d slides from slides.json", len(items))
 
 
+# Backend (DB + scheduler) init status, surfaced via /api/healthz so a failed
+# DB connection is diagnosable instead of crashing the container at startup.
+_startup_state: dict[str, object] = {
+    "dbInitialized": False,
+    "dbError": None,
+    "schedulerStarted": False,
+}
+
+
+async def _initialize_backend() -> None:
+    """Initialize the DB + scheduler off the request-serving critical path.
+
+    Cloud Run kills any container that does not start listening on ``$PORT``
+    within the startup timeout. Running ``init_db()`` *before* the server binds
+    means a slow or unreachable database turns into an opaque "failed to listen
+    on PORT" timeout with no usable error. Running it as a background task lets
+    the port open immediately, so the real cause is visible in the logs and at
+    ``/api/healthz`` (degraded mode) instead.
+    """
+    try:
+        await init_db()
+        await _seed_if_empty()
+        schedule_backfill_embeddings()
+        start_scheduler()
+        _startup_state["schedulerStarted"] = True
+        _startup_state["dbInitialized"] = True
+        _startup_state["dbError"] = None
+        log.info("backend initialization complete")
+    except Exception as exc:  # noqa: BLE001
+        _startup_state["dbInitialized"] = False
+        _startup_state["dbError"] = f"{type(exc).__name__}: {exc}"
+        log.exception("backend initialization failed; serving in degraded mode")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     config.log_config()
-    await init_db()
-    await _seed_if_empty()
-    schedule_backfill_embeddings()
-    start_scheduler()
-    yield
-    stop_scheduler()
+    task = asyncio.create_task(_initialize_backend())
+    try:
+        yield
+    finally:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        if _startup_state["schedulerStarted"]:
+            stop_scheduler()
 
 
 app = FastAPI(title="提案スライド検索 API", version="1.0.0", lifespan=lifespan)
@@ -120,7 +159,15 @@ async def log_requests(request: Request, call_next):
 
 @app.get("/api/healthz")
 def healthz():
-    return {"status": "ok", "config": config.describe()}
+    return {
+        "status": "ok",
+        "config": config.describe(),
+        "db": {
+            "initialized": bool(_startup_state["dbInitialized"]),
+            "error": _startup_state["dbError"],
+            "schedulerStarted": bool(_startup_state["schedulerStarted"]),
+        },
+    }
 
 
 async def _all_slides(session: AsyncSession) -> list[dict]:
