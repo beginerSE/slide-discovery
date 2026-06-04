@@ -12,6 +12,16 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# System packages needed by the ingest pipeline (pptx_pipeline.render_thumbnails):
+# - libreoffice-impress: PPTX -> PDF conversion (provides the `soffice` binary)
+# - poppler-utils:       PDF  -> PNG conversion (provides `pdftoppm`)
+# - fonts-noto-cjk:      Japanese glyphs so slide thumbnails don't render as tofu
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libreoffice-impress \
+        poppler-utils \
+        fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first for better layer caching.
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
