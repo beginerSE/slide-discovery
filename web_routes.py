@@ -8,6 +8,7 @@ updates (live search, ingest polling, inline saves).
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -34,6 +35,26 @@ templates = Jinja2Templates(
     directory=str(BASE_DIR / "templates"),
     context_processors=[csrf_context],
 )
+
+_JST = timezone(timedelta(hours=9))
+
+
+def _jst(value: Optional[str], fmt: str = "%Y/%m/%d %H:%M") -> str:
+    """Render a UTC ISO-8601 timestamp string (as emitted by the model
+    ``to_dict`` serializers) in Japan Standard Time. Returns "" for an
+    empty/None value so templates can guard with their own fallbacks."""
+    if not value:
+        return ""
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_JST).strftime(fmt)
+
+
+templates.env.filters["jst"] = _jst
 
 web_router = APIRouter(dependencies=[Depends(verify_csrf)])
 
