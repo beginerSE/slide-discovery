@@ -165,20 +165,32 @@ def use_vertex_ai() -> bool:
 
 # --- Thumbnail storage (Cloud Storage) --------------------------------------
 
+# Default GCS bucket for slide thumbnails in production. Lives in the same
+# project as Cloud Run; ADC (the runtime service account) supplies credentials.
+DEFAULT_THUMBNAIL_BUCKET = "slide_discovery"
+
+
 def thumbnail_bucket() -> str | None:
     """GCS bucket for slide thumbnails. Accepts ``THUMBNAIL_BUCKET`` /
     ``GCS_THUMBNAIL_BUCKET``.
 
-    Selected independently of ``RUNTIME_ENV`` (by presence): set it in
-    production to persist thumbnails in Cloud Storage so they survive instance
-    restarts and are shared across instances; leave it unset (dev) to keep
-    thumbnails on local disk.
+    Resolution order:
+    1. An explicit ``THUMBNAIL_BUCKET`` / ``GCS_THUMBNAIL_BUCKET`` env var.
+    2. In gcp (production) mode, defaults to ``slide_discovery`` — a bucket in
+       the same project as Cloud Run — so thumbnails persist in Cloud Storage
+       (surviving instance restarts, shared across instances) with no extra
+       config.
+    3. Otherwise (dev) unset → thumbnails stay on local disk.
     """
-    return (
+    explicit = (
         os.environ.get("THUMBNAIL_BUCKET")
         or os.environ.get("GCS_THUMBNAIL_BUCKET")
-        or None
     )
+    if explicit:
+        return explicit
+    if is_gcp():
+        return DEFAULT_THUMBNAIL_BUCKET
+    return None
 
 
 def use_gcs_thumbnails() -> bool:
