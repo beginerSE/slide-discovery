@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -383,6 +384,74 @@ def _tags_key(tags: list[str]) -> tuple[str, ...]:
     return tuple(sorted(tags or []))
 
 
+def _majority(values: list[str]) -> str:
+    """Most common non-empty value (the file's dominant default). Ties are
+    broken by first-seen order (Counter.most_common is stable). Returns ""
+    when every slide is empty."""
+    counts = Counter(v for v in values if v)
+    if not counts:
+        return ""
+    return counts.most_common(1)[0][0]
+
+
+# Client-name inference from a proposal file name. Japanese proposal decks are
+# almost always named after the client — either with a company suffix
+# (株式会社○○ / ○○株式会社) or an honorific (○○様 / ○○御中). We use those
+# high-precision signals first and fall back to the first "name-like" token.
+_CLIENT_NAME_CHARS = r"0-9A-Za-z一-龥々〆\u3005ぁ-んァ-ヴー＆&()（）・"
+_COMPANY_SUFFIXES = "株式会社|有限会社|合同会社|合資会社|合名会社"
+_HONORIFIC_RE = re.compile(
+    rf"([{_CLIENT_NAME_CHARS}]{{1,40}})\s*(?:様|御中)"
+)
+_COMPANY_RE = re.compile(
+    rf"((?:{_COMPANY_SUFFIXES})[{_CLIENT_NAME_CHARS}]{{1,30}}"
+    rf"|[{_CLIENT_NAME_CHARS}]{{1,30}}(?:{_COMPANY_SUFFIXES}))"
+)
+_CLIENT_SPLIT_RE = re.compile(r"[\s_\u3000|/／\\\[\]【】「」（）()、,，。\-–—~～]+")
+_DATE_TOKEN_RE = re.compile(
+    r"^(?:\d{1,4}[年月日._/-]?){1,3}\d{0,4}$|^v?\d+(?:\.\d+)?$", re.IGNORECASE
+)
+_CLIENT_STOPWORDS = {
+    "提案書", "提案", "ご提案", "御提案", "提案資料", "資料", "企画書", "企画",
+    "見積", "見積書", "御見積", "お見積", "プレゼン", "プレゼンテーション",
+    "ドラフト", "draft", "final", "最終", "最終版", "版", "コピー", "copy",
+    "サンプル", "sample", "テンプレート", "template", "報告書", "報告", "案",
+}
+_DOC_SUFFIXES = (
+    "提案書", "提案", "資料", "企画書", "企画", "見積書", "見積",
+    "報告書", "報告", "案", "版", "書",
+)
+
+
+def _infer_client_from_filename(file_name: str) -> str:
+    name = (file_name or "").strip()
+    name = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", name)  # drop a file extension
+    if not name:
+        return ""
+    # 1) Honorific marker (highest precision): "○○様" / "○○御中".
+    m = _HONORIFIC_RE.search(name)
+    if m:
+        cand = m.group(1).strip(" 　・-_")
+        if cand and cand not in _CLIENT_STOPWORDS:
+            return cand
+    # 2) Company suffix, prefix or suffix form.
+    m = _COMPANY_RE.search(name)
+    if m:
+        return m.group(1).strip(" 　・-_")
+    # 3) Conservative fallback: first name-like token that is not a date,
+    #    number or generic document word.
+    for tok in _CLIENT_SPLIT_RE.split(name):
+        tok = tok.strip(" 　・-_")
+        if not tok or tok in _CLIENT_STOPWORDS or tok.isdigit():
+            continue
+        if _DATE_TOKEN_RE.match(tok) or tok.endswith(_DOC_SUFFIXES):
+            continue
+        if not re.search(r"[一-龥々〆ぁ-んァ-ヴ]", tok):
+            continue  # require a kanji/kana char to avoid generic latin words
+        return tok
+    return ""
+
+
 class FileCommon(BaseModel):
     fileId: str
     fileName: str
@@ -417,15 +486,33 @@ def _summarize_file(file_id: str, rows: list[Slide]) -> FileCommon:
     industries = {r.industry or "" for r in rows}
     clients = {r.client or "" for r in rows}
     proposals = {r.proposal_type or "" for r in rows}
-    tag_sets = {_tags_key(list(r.tags or [])) for r in rows}
+    tag_keys = [_tags_key(list(r.tags or [])) for r in rows]
+    tag_sets = set(tag_keys)
+    file_name = rows[0].file_name if rows else ""
+
+    # Defaults: when slides disagree (or are empty) fall back to the file's
+    # dominant value so "ファイル管理" is pre-filled instead of blank. For the
+    # client, when no slide has one we infer the company from the file name.
+    client_default = _majority([r.client or "" for r in rows])
+    if not client_default:
+        client_default = _infer_client_from_filename(file_name)
+
+    nonempty_tag_keys = [k for k in tag_keys if k]
+    if len(tag_sets) == 1:
+        tags_default = list(rows[0].tags or []) if rows else []
+    elif nonempty_tag_keys:
+        tags_default = list(Counter(nonempty_tag_keys).most_common(1)[0][0])
+    else:
+        tags_default = []
+
     return FileCommon(
         fileId=file_id,
-        fileName=rows[0].file_name if rows else "",
+        fileName=file_name,
         slideCount=len(rows),
-        industry=next(iter(industries)) if len(industries) == 1 else "",
-        client=next(iter(clients)) if len(clients) == 1 else "",
-        proposalType=next(iter(proposals)) if len(proposals) == 1 else "",
-        tags=list(rows[0].tags or []) if len(tag_sets) == 1 else [],
+        industry=_majority([r.industry or "" for r in rows]),
+        client=client_default,
+        proposalType=_majority([r.proposal_type or "" for r in rows]),
+        tags=tags_default,
         industryMixed=len(industries) > 1,
         clientMixed=len(clients) > 1,
         proposalTypeMixed=len(proposals) > 1,
