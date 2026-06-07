@@ -50,8 +50,18 @@
       </div>
       {% endif %}
       {% if j.message %}<p class="text-xs text-destructive truncate mt-1">⚠ {{ j.message }}</p>{% endif %}
+      {% if j.ingestedFiles %}
+      <details class="text-xs text-muted mt-1">
+        <summary style="cursor:pointer">取り込んだファイル（{{ j.ingestedFiles | length }}件）</summary>
+        <ul style="margin:0.25rem 0 0;padding-left:1.1rem;display:flex;flex-direction:column;gap:0.15rem">
+          {% for f in j.ingestedFiles %}
+          <li class="truncate" title="{{ f }}">{{ f }}</li>
+          {% endfor %}
+        </ul>
+      </details>
+      {% endif %}
       <div class="text-xs text-muted mt-1">
-        {% if j.finishedAt %}{{ j.finishedAt[:16] | replace("T", " ") | replace("-", "/") }} 終了{% elif j.startedAt %}{{ j.startedAt[:16] | replace("T", " ") | replace("-", "/") }} 開始{% endif %}
+        {% if j.finishedAt %}{{ j.finishedAt | jst }} 終了{% elif j.startedAt %}{{ j.startedAt | jst }} 開始{% endif %}
       </div>
     </div>
     {% endfor %}
