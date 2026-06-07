@@ -154,6 +154,11 @@ class Slide(Base):
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(EMBED_DIM), nullable=True
     )
+    # Content version (etag, else "size:<n>") of the source file this slide was
+    # extracted from. Lets a resumed ingest tell "already-done page for the
+    # current file content" (reuse) apart from "stale page from an older
+    # version" (must recompute). NULL on legacy rows ingested before resume.
+    source_fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
@@ -373,6 +378,12 @@ class IngestJob(Base):
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
+    # Bumped on every progress write (onupdate). A running job whose
+    # updated_at is far in the past is "stalled" (e.g. crashed mid-run) and
+    # can be reaped so it stops blocking single-flight scheduling.
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -399,6 +410,7 @@ class IngestJob(Base):
             "currentFileTotal": self.current_file_total,
             "message": self.message,
             "startedAt": iso(self.started_at),
+            "updatedAt": iso(self.updated_at),
             "finishedAt": iso(self.finished_at),
         }
 
@@ -469,6 +481,19 @@ async def init_db() -> None:
             text(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS can_upload "
                 "boolean NOT NULL DEFAULT false"
+            )
+        )
+        # Resume support: per-slide content fingerprint + job heartbeat.
+        await conn.execute(
+            text(
+                "ALTER TABLE slides ADD COLUMN IF NOT EXISTS "
+                "source_fingerprint varchar"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE ingest_jobs ADD COLUMN IF NOT EXISTS updated_at "
+                "timestamptz NOT NULL DEFAULT now()"
             )
         )
         await conn.execute(
