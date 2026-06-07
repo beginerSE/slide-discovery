@@ -30,7 +30,7 @@
           {% if f.lastError %}<p class="text-xs text-destructive mt-1 truncate">⚠ {{ f.lastError }}</p>{% endif %}
         </div>
         <div class="row gap-2 shrink-0">
-          <button class="btn btn-ghost btn-icon" title="再取り込み" {% if is_running %}disabled{% endif %}
+          <button class="btn btn-ghost btn-icon" title="再取り込み"
             hx-post="/ui/admin/files/{{ f.id }}/retry" hx-target="#admin-files" hx-swap="innerHTML">{{ m.icon("rotate-cw") }}</button>
           <button class="btn btn-ghost btn-icon" title="削除"
             hx-post="/ui/admin/files/{{ f.id }}/delete" hx-target="#admin-files" hx-swap="innerHTML"
