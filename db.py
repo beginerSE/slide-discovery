@@ -344,6 +344,65 @@ class AddLog(Base):
         }
 
 
+class IngestJob(Base):
+    """A single ingest run, persisted so progress survives across processes.
+
+    The progress used to live in an in-memory singleton, which broke on
+    multi-instance / ephemeral hosting (Cloud Run): the polling request could
+    land on a different instance than the one running the job, so the progress
+    "disappeared". Persisting each run here lets any instance read the live
+    progress, and lets several jobs run/show in parallel.
+    """
+
+    __tablename__ = "ingest_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # manual (全件取り込み) | retry (単一ファイル再取り込み) | sync (自動同期)
+    kind: Mapped[str] = mapped_column(String, nullable=False, default="manual")
+    # running | done | failed
+    status: Mapped[str] = mapped_column(String, nullable=False, default="running")
+    actor_label: Mapped[str] = mapped_column(String, nullable=False, default="")
+    total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    processed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_file: Mapped[str | None] = mapped_column(String, nullable=True)
+    stage: Mapped[str | None] = mapped_column(String, nullable=True)
+    current_file_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    current_file_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, index=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    def to_dict(self) -> dict:
+        def iso(d: datetime | None) -> str | None:
+            return (
+                d.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                if d
+                else None
+            )
+
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "status": self.status,
+            "actorLabel": self.actor_label,
+            "total": self.total,
+            "processed": self.processed,
+            "failed": self.failed,
+            "currentFile": self.current_file,
+            "stage": self.stage,
+            "currentFilePage": self.current_file_page,
+            "currentFileTotal": self.current_file_total,
+            "message": self.message,
+            "startedAt": iso(self.started_at),
+            "finishedAt": iso(self.finished_at),
+        }
+
+
 class AppState(Base):
     """Tiny key/value store for cross-restart runtime state.
 
@@ -416,6 +475,12 @@ async def init_db() -> None:
             text(
                 "CREATE INDEX IF NOT EXISTS add_logs_created_at_idx "
                 "ON add_logs (created_at DESC)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ingest_jobs_started_at_idx "
+                "ON ingest_jobs (started_at DESC)"
             )
         )
 
