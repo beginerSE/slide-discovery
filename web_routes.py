@@ -401,6 +401,19 @@ async def ui_admin_run(request: Request):
         return await _status_partial(request, len(files))
 
 
+@web_router.post("/ui/admin/jobs/{job_id}/cleanup", response_class=HTMLResponse)
+async def ui_admin_cleanup_job(request: Request, job_id: int):
+    from admin_routes import cleanup_job_now
+
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        await cleanup_job_now(job_id)
+        files = await _drive_files(session)
+        return await _status_partial(request, len(files))
+
+
 def _conflicts_partial(
     request: Request, conflicts: list[dict], flash=None, flash_error=False
 ):
@@ -611,6 +624,38 @@ async def ui_admin_retry(request: Request, drive_file_id: int):
                 actor_label=(user.display_name or user.email),
             )
             flash = "再取り込みを開始しました"
+        except HTTPException as exc:
+            flash = exc.detail
+            flash_error = True
+        files = await _drive_files(session)
+        return _files_partial(
+            request,
+            files,
+            await any_running(),
+            flash=flash,
+            flash_error=flash_error,
+        )
+
+
+@web_router.post(
+    "/ui/admin/files/{drive_file_id}/regen-thumbnails",
+    response_class=HTMLResponse,
+)
+async def ui_admin_regen_thumbnails(request: Request, drive_file_id: int):
+    from admin_routes import regen_thumbnails
+    from ingest import any_running
+
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        flash = None
+        flash_error = False
+        try:
+            await regen_thumbnails(
+                drive_file_id, session=session, actor=user
+            )
+            flash = "サムネイル再生成を開始しました"
         except HTTPException as exc:
             flash = exc.detail
             flash_error = True
