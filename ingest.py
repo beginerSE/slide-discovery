@@ -5,75 +5,125 @@ import asyncio
 import logging
 import shutil
 import tempfile
-from datetime import datetime, timezone
+import time
 from pathlib import Path
-from typing import Any
 
 from sqlalchemy import delete, func, select
 
-from db import DriveFile, SessionLocal, Slide, utcnow
+from db import DriveFile, IngestJob, SessionLocal, Slide, utcnow
 from drive import DownloadResult, download, view_url
 from gemini_embed import build_slide_embed_text, embed_text
 from gemini_extract import extract_metadata
 from pptx_pipeline import SlideExtract, extract_slides, render_thumbnails
 
+import thumbnail_store
+from thumbnail_store import THUMB_ROOT
+
 log = logging.getLogger("ingest")
 
-# Where PNG thumbnails are persisted and served from.
-THUMB_ROOT = Path(__file__).parent / "data" / "thumbnails"
+# In-process guard so two concurrent jobs in the SAME process never ingest the
+# same Drive file at once (the persist step delete+inserts that file's slides).
+# Cross-instance safety relies on running ingest on a single warm instance
+# (Cloud Run: --min-instances=1 --max-instances=1 --no-cpu-throttling).
+_ACTIVE_FILES: set[str] = set()
+_ACTIVE_LOCK = asyncio.Lock()
+
+# Serializes single-flight scheduling so the "is one already running?" check
+# and the job-row reservation happen atomically (within this process).
+_SCHEDULE_LOCK = asyncio.Lock()
 
 
-class JobState:
-    """Single-flight in-memory job state."""
+class JobTracker:
+    """Writes one ingest run's live progress to its ``ingest_jobs`` row.
 
-    def __init__(self) -> None:
-        self.status: str = "idle"  # idle | running | done | failed
-        self.started_at: datetime | None = None
-        self.finished_at: datetime | None = None
-        self.total: int = 0
-        self.processed: int = 0
-        self.failed: int = 0
-        self.current_file: str | None = None
-        self.stage: str | None = None
-        self.current_file_page: int | None = None
-        self.current_file_total: int | None = None
-        self.message: str | None = None
-        self._lock = asyncio.Lock()
+    Each progress update is its own short transaction so any instance polling
+    the status reads the latest state. Per-page sub-progress is throttled
+    (~0.5s) to avoid a flood of tiny writes, but stage changes and the final
+    page of a stage always flush.
+    """
 
-    def set_stage(
+    def __init__(self, job_id: int) -> None:
+        self.job_id = job_id
+        self.processed = 0
+        self.failed = 0
+        self._last_page_flush = 0.0
+
+    async def _patch(self, **fields) -> None:
+        async with SessionLocal() as session:
+            job = await session.get(IngestJob, self.job_id)
+            if job is None:
+                return
+            for key, value in fields.items():
+                setattr(job, key, value)
+            await session.commit()
+
+    async def set_total(self, total: int) -> None:
+        await self._patch(total=total)
+
+    async def set_current_file(self, name: str | None) -> None:
+        await self._patch(current_file=name)
+
+    async def set_stage(
         self,
         stage: str | None,
         page: int | None = None,
         total: int | None = None,
+        *,
+        throttle: bool = False,
     ) -> None:
-        self.stage = stage
-        self.current_file_page = page
-        self.current_file_total = total
+        if throttle:
+            is_final = page is not None and total and page >= total
+            now = time.monotonic()
+            if not is_final and now - self._last_page_flush < 0.5:
+                return
+            self._last_page_flush = now
+        await self._patch(
+            stage=stage, current_file_page=page, current_file_total=total
+        )
 
-    def snapshot(self) -> dict:
-        def iso(d: datetime | None) -> str | None:
-            return (
-                d.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-                if d
-                else None
-            )
+    async def file_done(self) -> None:
+        self.processed += 1
+        await self._patch(
+            processed=self.processed,
+            current_file=None,
+            stage=None,
+            current_file_page=None,
+            current_file_total=None,
+        )
 
-        return {
-            "status": self.status,
-            "startedAt": iso(self.started_at),
-            "finishedAt": iso(self.finished_at),
-            "total": self.total,
-            "processed": self.processed,
-            "failed": self.failed,
-            "currentFile": self.current_file,
-            "stage": self.stage,
-            "currentFilePage": self.current_file_page,
-            "currentFileTotal": self.current_file_total,
-            "message": self.message,
+    async def file_failed(self, message: str) -> None:
+        self.failed += 1
+        await self._patch(
+            failed=self.failed,
+            message=message[:500],
+            current_file=None,
+            stage=None,
+            current_file_page=None,
+            current_file_total=None,
+        )
+
+    async def drop_one(self) -> None:
+        """Shrink the job's total by one (a file was skipped because another
+        concurrent run already owns it), so progress can still reach 100%."""
+        async with SessionLocal() as session:
+            job = await session.get(IngestJob, self.job_id)
+            if job is None:
+                return
+            job.total = max(0, (job.total or 0) - 1)
+            await session.commit()
+
+    async def finish(self, status: str, message: str | None = None) -> None:
+        fields: dict = {
+            "status": status,
+            "finished_at": utcnow(),
+            "current_file": None,
+            "stage": None,
+            "current_file_page": None,
+            "current_file_total": None,
         }
-
-
-JOB = JobState()
+        if message is not None:
+            fields["message"] = message[:500]
+        await self._patch(**fields)
 
 
 def _safe_name(file_id: str) -> str:
@@ -84,11 +134,12 @@ async def _ingest_one(
     session_factory,
     drive_file: DriveFile,
     force: bool,
+    tracker: JobTracker,
 ) -> tuple[int, int]:
     """Ingest a single DriveFile row. Returns (slides_added, slides_skipped)."""
     file_id = drive_file.drive_file_id
-    JOB.current_file = drive_file.file_name or file_id
-    JOB.set_stage("ダウンロード中")
+    await tracker.set_current_file(drive_file.file_name or file_id)
+    await tracker.set_stage("ダウンロード中")
 
     async with session_factory() as session:
         db_row = await session.get(DriveFile, drive_file.id)
@@ -103,7 +154,7 @@ async def _ingest_one(
     try:
         dl: DownloadResult = await download(file_id, tmp)
         # Filename is known after download — show it in the progress UI.
-        JOB.current_file = dl.file_name or file_id
+        await tracker.set_current_file(dl.file_name or file_id)
 
         if (
             not force
@@ -117,19 +168,19 @@ async def _ingest_one(
                     db_row.file_name = dl.file_name
                     await session.commit()
             log.info("skip unchanged %s", file_id)
-            JOB.set_stage(None)
+            await tracker.set_stage(None)
             return (0, 0)
 
         # Parse and render in worker thread (CPU/IO heavy)
-        JOB.set_stage("スライド解析中")
+        await tracker.set_stage("スライド解析中")
         extracts: list[SlideExtract] = await asyncio.to_thread(
             extract_slides, dl.path
         )
         n_pages = len(extracts)
-        JOB.set_stage("サムネイル生成中", page=0, total=n_pages)
+        await tracker.set_stage("サムネイル生成中", page=0, total=n_pages)
         thumb_out = THUMB_ROOT / _safe_name(file_id)
-        if thumb_out.exists():
-            shutil.rmtree(thumb_out)
+        # Clear any prior thumbnails for this file (local + GCS) before re-render.
+        await thumbnail_store.clear_file(file_id)
         thumb_paths = await asyncio.to_thread(render_thumbnails, dl.path, thumb_out)
         # Map page_no -> thumbnail
         for i, ex in enumerate(extracts):
@@ -138,7 +189,7 @@ async def _ingest_one(
 
         # Gemini metadata extraction — track completion per page
         meta_done = 0
-        JOB.set_stage("メタ情報抽出中（Gemini）", page=0, total=n_pages)
+        await tracker.set_stage("メタ情報抽出中（Gemini）", page=0, total=n_pages)
         sem = asyncio.Semaphore(2)
 
         async def _meta(ex: SlideExtract) -> dict:
@@ -165,16 +216,21 @@ async def _ingest_one(
                         "reuseHint": "",
                     }
             meta_done += 1
-            JOB.set_stage(
-                "メタ情報抽出中（Gemini）", page=meta_done, total=n_pages
+            await tracker.set_stage(
+                "メタ情報抽出中（Gemini）", page=meta_done, total=n_pages,
+                throttle=True,
             )
             return result
 
         gemini_results = await asyncio.gather(*[_meta(e) for e in extracts])
 
+        # Gemini no longer needs the local PNGs — publish them to the active
+        # backend (GCS in production, which also frees the ephemeral disk).
+        await thumbnail_store.put_file(file_id, thumb_out)
+
         # Embeddings (semantic search). Track completion per page.
         embed_done = 0
-        JOB.set_stage("ベクトル埋め込み生成中", page=0, total=n_pages)
+        await tracker.set_stage("ベクトル埋め込み生成中", page=0, total=n_pages)
         embed_sem = asyncio.Semaphore(4)
 
         async def _embed(ex: SlideExtract, meta: dict) -> list[float] | None:
@@ -199,8 +255,9 @@ async def _ingest_one(
                     )
                     vec = None
             embed_done += 1
-            JOB.set_stage(
-                "ベクトル埋め込み生成中", page=embed_done, total=n_pages
+            await tracker.set_stage(
+                "ベクトル埋め込み生成中", page=embed_done, total=n_pages,
+                throttle=True,
             )
             return vec
 
@@ -209,7 +266,7 @@ async def _ingest_one(
         )
 
         # Persist: delete existing slides for this file, insert fresh
-        JOB.set_stage("DB保存中", page=n_pages, total=n_pages)
+        await tracker.set_stage("DB保存中", page=n_pages, total=n_pages)
         async with session_factory() as session:
             db_row = await session.get(DriveFile, drive_file.id)
             # An admin-chosen display name (set on a name collision) overrides
@@ -265,7 +322,7 @@ async def _ingest_one(
                 db_row.slide_count = slides_added
             await session.commit()
         log.info("ingested %s -> %d slides", file_id, slides_added)
-        JOB.set_stage(None)
+        await tracker.set_stage(None)
         return (slides_added, 0)
     except Exception as e:
         log.exception("ingest failed for %s", file_id)
@@ -280,54 +337,138 @@ async def _ingest_one(
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+async def _create_job(kind: str, actor_label: str) -> int:
+    async with SessionLocal() as session:
+        job = IngestJob(
+            kind=kind,
+            status="running",
+            actor_label=actor_label,
+            started_at=utcnow(),
+        )
+        session.add(job)
+        await session.commit()
+        await session.refresh(job)
+        return job.id
+
+
 async def run_ingest(
     only_ids: list[int] | None = None,
     force: bool = False,
+    *,
+    kind: str = "manual",
+    actor_label: str = "",
+    job_id: int | None = None,
 ) -> dict:
-    """Run ingestion for all (or specified) drive_files. Single-flight."""
-    if JOB._lock.locked():
-        return {"started": False, "reason": "already running"}
+    """Run one ingest pass over all (or specified) drive_files.
 
-    async with JOB._lock:
-        JOB.status = "running"
-        JOB.started_at = utcnow()
-        JOB.finished_at = None
-        JOB.processed = 0
-        JOB.failed = 0
-        JOB.current_file = None
-        JOB.message = None
-        try:
-            async with SessionLocal() as session:
-                stmt = select(DriveFile)
-                if only_ids:
-                    stmt = stmt.where(DriveFile.id.in_(only_ids))
-                rows = (await session.execute(stmt)).scalars().all()
-            JOB.total = len(rows)
-            for row in rows:
-                try:
-                    await _ingest_one(SessionLocal, row, force=force)
-                    JOB.processed += 1
-                except Exception as e:
-                    JOB.failed += 1
-                    JOB.message = f"{row.drive_file_id}: {e}"
-            JOB.status = "done"
-            JOB.finished_at = utcnow()
-            JOB.current_file = None
-            JOB.set_stage(None)
-            return JOB.snapshot()
-        except Exception as e:
-            JOB.status = "failed"
-            JOB.message = str(e)
-            JOB.finished_at = utcnow()
-            log.exception("ingest run failed")
-            return JOB.snapshot()
+    Records a row in ``ingest_jobs`` and streams live progress to it, so any
+    instance can read the status. Several runs may proceed in parallel; the
+    in-process ``_ACTIVE_FILES`` guard skips a file already being ingested by
+    another concurrent run in this process. ``job_id`` may be a row created by
+    the caller (so single-flight scheduling can reserve it atomically);
+    otherwise a fresh row is created here.
+    """
+    if job_id is None:
+        job_id = await _create_job(kind, actor_label)
+
+    tracker = JobTracker(job_id)
+    try:
+        async with SessionLocal() as session:
+            stmt = select(DriveFile)
+            if only_ids:
+                stmt = stmt.where(DriveFile.id.in_(only_ids))
+            rows = (await session.execute(stmt)).scalars().all()
+        await tracker.set_total(len(rows))
+        for row in rows:
+            async with _ACTIVE_LOCK:
+                owned = row.drive_file_id in _ACTIVE_FILES
+                if not owned:
+                    _ACTIVE_FILES.add(row.drive_file_id)
+            if owned:
+                # Another concurrent run owns this file — skip to avoid a
+                # delete/insert race on its slides, and shrink our total so
+                # the progress bar still completes.
+                await tracker.drop_one()
+                continue
+            try:
+                await _ingest_one(SessionLocal, row, force=force, tracker=tracker)
+                await tracker.file_done()
+            except Exception as e:  # noqa: BLE001
+                await tracker.file_failed(f"{row.drive_file_id}: {e}")
+            finally:
+                async with _ACTIVE_LOCK:
+                    _ACTIVE_FILES.discard(row.drive_file_id)
+        await tracker.finish("done")
+    except Exception as e:  # noqa: BLE001
+        log.exception("ingest run failed")
+        await tracker.finish("failed", message=str(e))
+    return {"jobId": job_id}
 
 
-def schedule_ingest_background(only_ids: list[int] | None = None, force: bool = False):
-    """Kick off ingest as a background task without awaiting."""
-    if JOB._lock.locked():
-        return False
-    asyncio.create_task(run_ingest(only_ids=only_ids, force=force))
+async def _count_running(kind: str | None = None) -> int:
+    async with SessionLocal() as session:
+        stmt = (
+            select(func.count())
+            .select_from(IngestJob)
+            .where(IngestJob.status == "running")
+        )
+        if kind:
+            stmt = stmt.where(IngestJob.kind == kind)
+        return int((await session.execute(stmt)).scalar() or 0)
+
+
+async def any_running() -> bool:
+    return await _count_running() > 0
+
+
+async def manual_running() -> bool:
+    return await _count_running("manual") > 0
+
+
+async def list_jobs(limit: int = 12) -> list[dict]:
+    """Recent ingest jobs (running first), newest first, for the admin UI."""
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(IngestJob)
+                .order_by(IngestJob.started_at.desc())
+                .limit(limit)
+            )
+        ).scalars().all()
+    rows.sort(key=lambda r: (r.status != "running", -(r.id or 0)))
+    return [r.to_dict() for r in rows]
+
+
+async def schedule_ingest_background(
+    only_ids: list[int] | None = None,
+    force: bool = False,
+    *,
+    kind: str = "manual",
+    actor_label: str = "",
+) -> bool:
+    """Kick off an ingest run as a background task without awaiting.
+
+    Full-catalog ``manual`` and ``sync`` runs are single-flight per kind (a new
+    one is refused while one of the same kind is running); ``retry`` runs of
+    individual files may stack and run in parallel.
+
+    Single-flight is made atomic by reserving the ``ingest_jobs`` row under
+    ``_SCHEDULE_LOCK`` before spawning the task, so two callers that both see
+    zero running jobs cannot both start one.
+    """
+    async with _SCHEDULE_LOCK:
+        if kind in ("manual", "sync") and await _count_running(kind) > 0:
+            return False
+        job_id = await _create_job(kind, actor_label)
+    asyncio.create_task(
+        run_ingest(
+            only_ids=only_ids,
+            force=force,
+            kind=kind,
+            actor_label=actor_label,
+            job_id=job_id,
+        )
+    )
     return True
 
 
