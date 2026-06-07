@@ -13,7 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import require_admin
 from db import AddLog, DriveFile, DriveFolder, Slide, User, get_session, utcnow
 from drive import fetch_file_name, list_folder_files, parse_share_input, view_url
-from ingest import list_jobs, schedule_ingest_background
+from ingest import (
+    cleanup_job,
+    list_jobs,
+    schedule_ingest_background,
+    schedule_thumbnail_regen_background,
+)
 
 log = logging.getLogger("api.admin")
 router = APIRouter(
@@ -524,6 +529,37 @@ async def retry_drive_file(
     return {"started": started, "jobs": await list_jobs()}
 
 
+async def regen_thumbnails(
+    drive_file_id: int,
+    *,
+    session: AsyncSession,
+    actor: Optional[User] = None,
+):
+    """Re-render and re-publish ONLY this file's thumbnails (no Gemini recompute).
+
+    Records the action in the add-history audit log, then schedules the
+    thumbnail-only regen as a background job. This is a plain helper (not an HTTP
+    route) — the HTML/HTMX admin UI calls it directly with an explicit session,
+    matching the single-source-of-truth pattern used across the admin handlers.
+    """
+    row = await session.get(DriveFile, drive_file_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="not found")
+    await log_addition(
+        session,
+        actor=actor,
+        action="サムネイル再生成",
+        drive_file_id=row.drive_file_id,
+        share_url=view_url(row.drive_file_id),
+        file_name=row.display_name or row.file_name or row.drive_file_id,
+    )
+    await session.commit()
+    started = await schedule_thumbnail_regen_background(
+        row.id, actor_label=_actor_label(actor)
+    )
+    return {"started": started, "jobs": await list_jobs()}
+
+
 class RunBody(BaseModel):
     force: bool = False
 
@@ -535,6 +571,12 @@ async def run_now(body: RunBody | None = None, actor_label: str = ""):
         only_ids=None, force=force, kind="manual", actor_label=actor_label
     )
     return {"started": started, "jobs": await list_jobs()}
+
+
+@ingest_router.post("/jobs/{job_id}/cleanup")
+async def cleanup_job_now(job_id: int):
+    cleaned = await cleanup_job(job_id)
+    return {"cleaned": cleaned, "jobs": await list_jobs()}
 
 
 @ingest_router.get("/status")
