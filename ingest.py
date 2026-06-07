@@ -78,11 +78,31 @@ class JobTracker:
         self.failed = 0
         self._last_page_flush = 0.0
 
+    def _abort_if_not_running(self, job: IngestJob | None) -> None:
+        """Cooperative, DB-driven cancellation checkpoint.
+
+        Every progress write re-reads the job row; if it is no longer
+        ``running`` (an admin cleanup / the stalled-job reaper / another
+        process flipped it to a terminal status) we stop the worker right
+        here. This is what makes 中断 reliable in production: on Cloud Run the
+        cancel request may land on a *different* instance than the one running
+        the task, so in-process ``task.cancel()`` can't reach it — but the next
+        progress write on the owning instance sees the terminal DB status and
+        aborts. It also stops the worker from re-populating progress fields the
+        cleanup just cleared (which made a "cancelled" job look still-running).
+        """
+        if job is not None and job.status != "running":
+            raise asyncio.CancelledError(
+                f"ingest job {self.job_id} no longer running "
+                f"(status={job.status}); aborting"
+            )
+
     async def _patch(self, **fields) -> None:
         async with SessionLocal() as session:
             job = await session.get(IngestJob, self.job_id)
             if job is None:
                 return
+            self._abort_if_not_running(job)
             for key, value in fields.items():
                 setattr(job, key, value)
             await session.commit()
@@ -139,6 +159,7 @@ class JobTracker:
             job = await session.get(IngestJob, self.job_id)
             if job is None:
                 return
+            self._abort_if_not_running(job)
             job.total = max(0, (job.total or 0) - 1)
             await session.commit()
 
