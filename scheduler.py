@@ -19,7 +19,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import config
 from drive_sync import sync_drive_changes
-from ingest import JOB, backfill_missing_embeddings, run_ingest
+from ingest import (
+    backfill_missing_embeddings,
+    schedule_ingest_background,
+)
 
 log = logging.getLogger("ingest.scheduler")
 
@@ -27,11 +30,15 @@ _scheduler: AsyncIOScheduler | None = None
 
 
 async def _tick():
-    if JOB._lock.locked():
-        log.info("scheduled ingest skipped: job already running")
+    # Single-flight per kind: schedule_ingest_background refuses a new "sync"
+    # run while one is already running, so an hourly tick can't pile up.
+    started = await schedule_ingest_background(
+        only_ids=None, force=False, kind="sync", actor_label="自動同期"
+    )
+    if not started:
+        log.info("scheduled ingest skipped: sync job already running")
         return
     log.info("scheduled ingest tick start")
-    await run_ingest(only_ids=None, force=False)
 
 
 async def _changes_tick():
