@@ -11,6 +11,7 @@ from pathlib import Path
 
 from sqlalchemy import delete, func, select, update
 
+import config
 from db import DriveFile, IngestJob, SessionLocal, Slide, utcnow
 from drive import DownloadResult, download, view_url
 from gemini_embed import build_slide_embed_text, embed_text
@@ -300,10 +301,15 @@ async def _ingest_one(
     file_id = drive_file.drive_file_id
     await tracker.set_current_file(drive_file.file_name or file_id)
     await tracker.set_stage("ダウンロード中")
+    log.info(
+        "ingest start file_id=%s name=%r force=%s",
+        file_id, drive_file.display_name or drive_file.file_name, force,
+    )
 
     async with session_factory() as session:
         db_row = await session.get(DriveFile, drive_file.id)
         if db_row is None:
+            log.warning("ingest abort file_id=%s: drive_file row missing", file_id)
             return (0, 0)
         db_row.status = "processing"
         db_row.last_error = None
@@ -319,6 +325,10 @@ async def _ingest_one(
         await tracker.set_current_file(dl.file_name or file_id)
         eff_name = drive_file.display_name or dl.file_name
         fingerprint = _file_fingerprint(dl.etag, dl.size)
+        log.info(
+            "ingest downloaded file_id=%s name=%r size=%s etag=%s",
+            file_id, dl.file_name, dl.size, dl.etag,
+        )
 
         if (
             not force
@@ -360,12 +370,20 @@ async def _ingest_one(
             extract_slides, dl.path
         )
         n_pages = len(extracts)
+        log.info("ingest extracted file_id=%s pages=%d", file_id, n_pages)
         page_nos = {ex.page_no for ex in extracts}
         await tracker.set_stage("サムネイル生成中", page=0, total=n_pages)
-        thumb_out = THUMB_ROOT / _safe_name(file_id)
-        # Clear any prior thumbnails for this file (local + GCS) before re-render.
-        await thumbnail_store.clear_file(file_id)
+        # Two-phase publish: render into a staging dir (a sibling of the live
+        # dir, so it shares THUMB_ROOT's filesystem for an atomic rename) and
+        # only swap it in AFTER a successful render+publish. A mid-render failure
+        # therefore never wipes the file's existing thumbnails.
+        thumb_out = THUMB_ROOT / f"{_safe_name(file_id)}.staging"
+        shutil.rmtree(thumb_out, ignore_errors=True)
         thumb_paths = await asyncio.to_thread(render_thumbnails, dl.path, thumb_out)
+        log.info(
+            "ingest rendered thumbnails file_id=%s count=%d",
+            file_id, len(thumb_paths),
+        )
         # Map page_no -> thumbnail
         for i, ex in enumerate(extracts):
             if i < len(thumb_paths):
@@ -403,9 +421,14 @@ async def _ingest_one(
         # Phase 1 — Gemini metadata for pages that need it, persisted per page.
         meta_total = len(recompute)
         meta_done = 0
+        log.info(
+            "ingest plan file_id=%s recompute=%d reused=%d",
+            file_id, len(recompute), reused,
+        )
         await tracker.set_stage(
             "メタ情報抽出中（Gemini）", page=0, total=meta_total
         )
+        log.info("ingest gemini-metadata start file_id=%s pages=%d", file_id, meta_total)
         sem = asyncio.Semaphore(2)
 
         async def _meta(ex: SlideExtract) -> None:
@@ -434,10 +457,17 @@ async def _ingest_one(
             )
 
         await asyncio.gather(*[_meta(e) for e in recompute])
+        log.info("ingest gemini-metadata done file_id=%s pages=%d", file_id, meta_total)
 
         # Gemini no longer needs the local PNGs — publish them to the active
-        # backend (GCS in production, which also frees the ephemeral disk).
-        await thumbnail_store.put_file(file_id, thumb_out)
+        # backend (atomic swap locally / upload+prune on GCS), replacing the old
+        # thumbnails only now that the render succeeded.
+        published = await thumbnail_store.publish_file(file_id, thumb_out)
+        log.info(
+            "ingest thumbnails published file_id=%s ok=%s pages=%d backend=%s",
+            file_id, published, len(thumb_paths),
+            "gcs" if config.use_gcs_thumbnails() else "local",
+        )
 
         # Phase 2 — embeddings for any current-page slide still missing one
         # (freshly recomputed pages + pages whose embedding was interrupted).
@@ -458,6 +488,7 @@ async def _ingest_one(
         await tracker.set_stage(
             "ベクトル埋め込み生成中", page=0, total=embed_total
         )
+        log.info("ingest embeddings start file_id=%s pages=%d", file_id, embed_total)
         embed_sem = asyncio.Semaphore(4)
 
         async def _embed(slide_id: str, text: str) -> None:
@@ -499,6 +530,7 @@ async def _ingest_one(
                 for r in pending
             ]
         )
+        log.info("ingest embeddings done file_id=%s pages=%d", file_id, embed_total)
 
         # Finalize: drop pages no longer in the deck, refresh the display name
         # on reused rows, and mark the file ready — but only if EVERY current
@@ -665,6 +697,10 @@ async def run_ingest(
                 stmt = stmt.where(DriveFile.id.in_(only_ids))
             rows = (await session.execute(stmt)).scalars().all()
         await tracker.set_total(len(rows))
+        log.info(
+            "ingest run %d start: files=%d kind=%s force=%s only_ids=%s",
+            job_id, len(rows), kind, force, only_ids or "all",
+        )
         for row in rows:
             async with _ACTIVE_LOCK:
                 owned = row.drive_file_id in _ACTIVE_FILES
@@ -691,6 +727,7 @@ async def run_ingest(
                 async with _ACTIVE_LOCK:
                     _ACTIVE_FILES.discard(row.drive_file_id)
         await tracker.finish("done")
+        log.info("ingest run %d done: files=%d", job_id, len(rows))
     except asyncio.CancelledError:
         log.info("ingest run %d cancelled", job_id)
         raise
@@ -888,6 +925,10 @@ async def _regen_thumbnails_one(
     file_id = drive_file.drive_file_id
     await tracker.set_current_file(drive_file.display_name or drive_file.file_name or file_id)
     await tracker.set_stage("ダウンロード中")
+    log.info(
+        "thumbnail regen start file_id=%s name=%r",
+        file_id, drive_file.display_name or drive_file.file_name,
+    )
 
     tmp = Path(tempfile.mkdtemp(prefix="thumb_"))
     try:
@@ -908,13 +949,23 @@ async def _regen_thumbnails_one(
             )
 
         await tracker.set_stage("サムネイル生成中")
-        thumb_out = THUMB_ROOT / _safe_name(file_id)
-        await thumbnail_store.clear_file(file_id)
+        # Two-phase publish: render into a staging dir and swap it in only after
+        # a successful render+publish, so a failed regen keeps the old images.
+        thumb_out = THUMB_ROOT / f"{_safe_name(file_id)}.staging"
+        shutil.rmtree(thumb_out, ignore_errors=True)
         thumb_paths = await asyncio.to_thread(render_thumbnails, dl.path, thumb_out)
         n_pages = len(thumb_paths)
+        log.info(
+            "thumbnail regen rendered file_id=%s count=%d", file_id, n_pages
+        )
 
         await tracker.set_stage("サムネイル保存中", page=0, total=n_pages)
-        await thumbnail_store.put_file(file_id, thumb_out)
+        published = await thumbnail_store.publish_file(file_id, thumb_out)
+        log.info(
+            "thumbnail regen published file_id=%s ok=%s pages=%d backend=%s",
+            file_id, published, n_pages,
+            "gcs" if config.use_gcs_thumbnails() else "local",
+        )
 
         # Re-attach canonical thumbnail URLs to existing slide rows. Page
         # numbering is stable (1..n), so the URLs are unchanged — but a row that
