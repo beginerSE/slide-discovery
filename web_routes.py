@@ -318,43 +318,52 @@ async def _drive_files(session) -> list[dict]:
     return (await list_drive_files(session=session))["items"]
 
 
+async def _status_partial(request: Request, files_count: int):
+    from ingest import list_jobs, manual_running
+
+    return templates.TemplateResponse(
+        request,
+        "_admin_status.html",
+        {
+            "request": request,
+            "jobs": await list_jobs(),
+            "manual_running": await manual_running(),
+            "files_count": files_count,
+        },
+    )
+
+
 @web_router.get("/admin", response_class=HTMLResponse)
 async def admin_page(request: Request):
-    from ingest import JOB
+    from ingest import list_jobs, manual_running
 
     async with SessionLocal() as session:
         user, err = await _require_admin(request, session)
         if err is not None:
             return err
         files = await _drive_files(session)
-        snapshot = JOB.snapshot()
         return templates.TemplateResponse(request, 
             "admin.html",
             {
                 "request": request,
                 "user": _user_dict(user),
                 "active_nav": "/admin",
-                "status": snapshot,
+                "jobs": await list_jobs(),
+                "manual_running": await manual_running(),
                 "files_count": len(files),
                 "files": files,
-                "is_running": snapshot.get("status") == "running",
             },
         )
 
 
 @web_router.get("/ui/admin/status", response_class=HTMLResponse)
 async def ui_admin_status(request: Request):
-    from ingest import JOB
-
     async with SessionLocal() as session:
         user, err = await _require_admin(request, session)
         if err is not None:
             return err
         files = await _drive_files(session)
-        return templates.TemplateResponse(request, 
-            "_admin_status.html",
-            {"request": request, "status": JOB.snapshot(), "files_count": len(files)},
-        )
+        return await _status_partial(request, len(files))
 
 
 def _files_partial(request: Request, files: list[dict], is_running: bool, **extra):
@@ -366,31 +375,30 @@ def _files_partial(request: Request, files: list[dict], is_running: bool, **extr
 
 @web_router.get("/ui/admin/files", response_class=HTMLResponse)
 async def ui_admin_files(request: Request):
-    from ingest import JOB
+    from ingest import any_running
 
     async with SessionLocal() as session:
         user, err = await _require_admin(request, session)
         if err is not None:
             return err
         files = await _drive_files(session)
-        return _files_partial(request, files, JOB.snapshot().get("status") == "running")
+        return _files_partial(request, files, await any_running())
 
 
 @web_router.post("/ui/admin/run", response_class=HTMLResponse)
 async def ui_admin_run(request: Request):
     from admin_routes import RunBody, run_now
-    from ingest import JOB
 
     async with SessionLocal() as session:
         user, err = await _require_admin(request, session)
         if err is not None:
             return err
-        await run_now(RunBody(force=False))
-        files = await _drive_files(session)
-        return templates.TemplateResponse(request, 
-            "_admin_status.html",
-            {"request": request, "status": JOB.snapshot(), "files_count": len(files)},
+        await run_now(
+            RunBody(force=False),
+            actor_label=(user.display_name or user.email),
         )
+        files = await _drive_files(session)
+        return await _status_partial(request, len(files))
 
 
 def _conflicts_partial(
@@ -587,7 +595,7 @@ async def ui_admin_add_resolve(request: Request):
 @web_router.post("/ui/admin/files/{drive_file_id}/retry", response_class=HTMLResponse)
 async def ui_admin_retry(request: Request, drive_file_id: int):
     from admin_routes import RetryBody, retry_drive_file
-    from ingest import JOB
+    from ingest import any_running
 
     async with SessionLocal() as session:
         user, err = await _require_admin(request, session)
@@ -596,7 +604,12 @@ async def ui_admin_retry(request: Request, drive_file_id: int):
         flash = None
         flash_error = False
         try:
-            await retry_drive_file(drive_file_id, RetryBody(force=True), session=session)
+            await retry_drive_file(
+                drive_file_id,
+                RetryBody(force=True),
+                session=session,
+                actor_label=(user.display_name or user.email),
+            )
             flash = "再取り込みを開始しました"
         except HTTPException as exc:
             flash = exc.detail
@@ -605,7 +618,7 @@ async def ui_admin_retry(request: Request, drive_file_id: int):
         return _files_partial(
             request,
             files,
-            JOB.snapshot().get("status") == "running",
+            await any_running(),
             flash=flash,
             flash_error=flash_error,
         )
@@ -614,7 +627,7 @@ async def ui_admin_retry(request: Request, drive_file_id: int):
 @web_router.post("/ui/admin/files/{drive_file_id}/delete", response_class=HTMLResponse)
 async def ui_admin_delete(request: Request, drive_file_id: int):
     from admin_routes import delete_drive_file
-    from ingest import JOB
+    from ingest import any_running
 
     async with SessionLocal() as session:
         user, err = await _require_admin(request, session)
@@ -632,7 +645,7 @@ async def ui_admin_delete(request: Request, drive_file_id: int):
         return _files_partial(
             request,
             files,
-            JOB.snapshot().get("status") == "running",
+            await any_running(),
             flash=flash,
             flash_error=flash_error,
         )
