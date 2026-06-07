@@ -657,6 +657,8 @@ label.field-label {
 
 .file-row { display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.75rem 0; border-top: 1px solid hsl(var(--border)); }
 .file-row:first-child { border-top: none; }
+.job-row { padding: 0.75rem 0; border-top: 1px solid hsl(var(--border)); }
+.job-row:first-child { border-top: none; padding-top: 0; }
 .file-row .ficon { width: 1.25rem; height: 1.25rem; color: hsl(var(--muted-foreground)); flex-shrink: 0; margin-top: 0.15rem; }
 .file-name { font-weight: 500; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-meta { font-size: 0.72rem; color: hsl(var(--muted-foreground)); margin-top: 0.25rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
