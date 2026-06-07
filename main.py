@@ -31,7 +31,7 @@ from db import (
 )
 from gemini_embed import embed_text
 import thumbnail_store
-from ingest import schedule_backfill_embeddings
+from ingest import reap_orphaned_jobs, schedule_backfill_embeddings
 from search_query import ParsedQuery, parse_search_query, query_matches
 from scheduler import start_scheduler, stop_scheduler
 from thumbnail import render_thumbnail_svg
@@ -109,6 +109,9 @@ async def _initialize_backend() -> None:
     try:
         await init_db()
         await _seed_if_empty()
+        # Clear jobs/files left "running"/"processing" by a previous process
+        # that died mid-ingest, so they don't block scheduling or show forever.
+        await reap_orphaned_jobs()
         schedule_backfill_embeddings()
         start_scheduler()
         _startup_state["schedulerStarted"] = True
