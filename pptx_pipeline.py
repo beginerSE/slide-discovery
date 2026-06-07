@@ -95,6 +95,7 @@ def render_thumbnails(pptx_path: Path, out_dir: Path, dpi: int = 110) -> list[Pa
     Returns sorted list of PNG paths (one per slide).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    log.info("render start: PPTX->PDF %s (dpi=%d)", pptx_path.name, dpi)
     with tempfile.TemporaryDirectory(prefix="pptx_") as tmp:
         tmp_dir = Path(tmp)
         # 1) PPTX → PDF
@@ -120,6 +121,7 @@ def render_thumbnails(pptx_path: Path, out_dir: Path, dpi: int = 110) -> list[Pa
         if not pdfs:
             raise RuntimeError("LibreOffice produced no PDF output")
         pdf = pdfs[0]
+        log.info("render: PDF->PNG %s", pptx_path.name)
         # 2) PDF → PNG (one per page)
         page_prefix = tmp_dir / "page"
         r2 = subprocess.run(
@@ -141,4 +143,5 @@ def render_thumbnails(pptx_path: Path, out_dir: Path, dpi: int = 110) -> list[Pa
             target = out_dir / f"{i}.png"
             shutil.move(str(p), str(target))
             final.append(target)
+        log.info("render done: %s -> %d pages", pptx_path.name, len(final))
         return final
