@@ -352,9 +352,18 @@ async def list_folder_files(folder_id: str) -> list[tuple[str, str]]:
 
 async def download(file_id: str, out_dir: Path) -> DownloadResult:
     """Download a Drive file to ``out_dir`` as ``<file_id>.pptx``."""
-    if config.use_drive_api():
-        return await _download_api(file_id, out_dir)
-    return await _download_public(file_id, out_dir)
+    mode = "api" if config.use_drive_api() else "public"
+    log.info("download start id=%s mode=%s", file_id, mode)
+    dl = (
+        await _download_api(file_id, out_dir)
+        if config.use_drive_api()
+        else await _download_public(file_id, out_dir)
+    )
+    log.info(
+        "download done id=%s name=%r size=%s etag=%s",
+        file_id, dl.file_name, dl.size, dl.etag,
+    )
+    return dl
 
 
 async def _fetch_file_name_api(file_id: str) -> str:
