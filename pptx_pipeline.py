@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -122,8 +121,11 @@ def render_thumbnails(pptx_path: Path, out_dir: Path, dpi: int = 110) -> list[Pa
             raise RuntimeError("LibreOffice produced no PDF output")
         pdf = pdfs[0]
         log.info("render: PDF->PNG %s", pptx_path.name)
-        # 2) PDF → PNG (one per page)
-        page_prefix = tmp_dir / "page"
+        # 2) PDF → PNG (one per page). Write directly into out_dir (not the temp
+        # dir) so a caller can observe pages landing on disk for live progress —
+        # the PPTX→PDF (soffice) step above produces no intermediate files, so
+        # the count staying at 0 during it cleanly signals "still converting".
+        page_prefix = out_dir / "page"
         r2 = subprocess.run(
             ["pdftoppm", "-png", "-r", str(dpi), str(pdf), str(page_prefix)],
             capture_output=True,
@@ -134,14 +136,15 @@ def render_thumbnails(pptx_path: Path, out_dir: Path, dpi: int = 110) -> list[Pa
             raise RuntimeError(
                 f"pdftoppm failed: {r2.stderr or r2.stdout}"
             )
-        pages = sorted(tmp_dir.glob("page-*.png"))
+        pages = sorted(out_dir.glob("page-*.png"))
         if not pages:
             raise RuntimeError("pdftoppm produced no PNG output")
-        # Move into out_dir as 1.png, 2.png, ...
+        # Rename in place to 1.png, 2.png, ... (same dir, so the total *.png
+        # count stays stable while a progress poller is watching).
         final: list[Path] = []
         for i, p in enumerate(pages, start=1):
             target = out_dir / f"{i}.png"
-            shutil.move(str(p), str(target))
+            p.rename(target)
             final.append(target)
         log.info("render done: %s -> %d pages", pptx_path.name, len(final))
         return final
