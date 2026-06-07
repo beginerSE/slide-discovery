@@ -163,6 +163,33 @@ def use_vertex_ai() -> bool:
     return is_gcp() and gcp_project() is not None
 
 
+# --- Thumbnail storage (Cloud Storage) --------------------------------------
+
+def thumbnail_bucket() -> str | None:
+    """GCS bucket for slide thumbnails. Accepts ``THUMBNAIL_BUCKET`` /
+    ``GCS_THUMBNAIL_BUCKET``.
+
+    Selected independently of ``RUNTIME_ENV`` (by presence): set it in
+    production to persist thumbnails in Cloud Storage so they survive instance
+    restarts and are shared across instances; leave it unset (dev) to keep
+    thumbnails on local disk.
+    """
+    return (
+        os.environ.get("THUMBNAIL_BUCKET")
+        or os.environ.get("GCS_THUMBNAIL_BUCKET")
+        or None
+    )
+
+
+def use_gcs_thumbnails() -> bool:
+    return bool(thumbnail_bucket())
+
+
+def thumbnail_prefix() -> str:
+    """Object-name prefix (folder) for thumbnails within the bucket."""
+    return (os.environ.get("THUMBNAIL_PREFIX") or "thumbnails").strip("/")
+
+
 # --- Google Drive -----------------------------------------------------------
 
 def use_drive_api() -> bool:
@@ -210,6 +237,7 @@ def describe() -> dict:
         "cloudSqlIamAuth": cloud_sql_iam_auth() if use_cloud_sql() else None,
         "gemini": "vertex_ai" if use_vertex_ai() else "generative_language_api",
         "drive": "drive_api" if use_drive_api() else "public_share_link",
+        "thumbnails": "gcs" if use_gcs_thumbnails() else "local_disk",
     }
 
 
