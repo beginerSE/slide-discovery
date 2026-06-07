@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,7 +30,8 @@ from db import (
     utcnow,
 )
 from gemini_embed import embed_text
-from ingest import THUMB_ROOT, schedule_backfill_embeddings
+import thumbnail_store
+from ingest import schedule_backfill_embeddings
 from search_query import ParsedQuery, parse_search_query, query_matches
 from scheduler import start_scheduler, stop_scheduler
 from thumbnail import render_thumbnail_svg
@@ -599,12 +600,13 @@ async def get_thumbnail_svg(
 
 @app.get("/api/thumbnails/files/{file_id}/{page_no}.png")
 async def get_thumbnail_png(file_id: str, page_no: int):
-    safe = "".join(c for c in file_id if c.isalnum() or c in "-_")
-    p = THUMB_ROOT / safe / f"{page_no}.png"
-    if not p.exists():
+    data = await thumbnail_store.get(file_id, page_no)
+    if data is None:
         raise HTTPException(status_code=404, detail="thumbnail not found")
-    return FileResponse(
-        p, media_type="image/png", headers={"Cache-Control": "public, max-age=300"}
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=300"},
     )
 
 
