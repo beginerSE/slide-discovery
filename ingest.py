@@ -6,9 +6,10 @@ import logging
 import shutil
 import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from db import DriveFile, IngestJob, SessionLocal, Slide, utcnow
 from drive import DownloadResult, download, view_url
@@ -31,6 +32,34 @@ _ACTIVE_LOCK = asyncio.Lock()
 # Serializes single-flight scheduling so the "is one already running?" check
 # and the job-row reservation happen atomically (within this process).
 _SCHEDULE_LOCK = asyncio.Lock()
+
+# Background ingest tasks by job_id, so manual cleanup / stalled-job reaping can
+# cooperatively cancel the in-flight task (not just flip its DB row). Only holds
+# tasks started by THIS process; an orphaned job from a dead process has no
+# entry here and is simply marked failed.
+_RUNNING_TASKS: dict[int, asyncio.Task] = {}
+
+
+def _cancel_task(job_id: int) -> None:
+    task = _RUNNING_TASKS.get(job_id)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+def _ingest_complete(missing_embeddings: int) -> bool:
+    """A file is fully ingested only when no current page is missing its
+    embedding. Used to gate ``ready``/unchanged-skip markers."""
+    return missing_embeddings == 0
+
+
+class IncompleteIngest(Exception):
+    """A file finished a pass but some pages are still missing embeddings.
+
+    The file row has already been left in a resumable (``pending``) state with
+    its per-page progress persisted, so the generic failure handler must NOT
+    overwrite that status to ``failed``. The current run still reports the file
+    as not-done so a later run finishes the remaining pages.
+    """
 
 
 class JobTracker:
@@ -112,7 +141,20 @@ class JobTracker:
             job.total = max(0, (job.total or 0) - 1)
             await session.commit()
 
+    async def heartbeat(self) -> None:
+        """Bump the job's progress timestamp so a long stage (download, parse,
+        a slow Gemini call) is not mistaken for a stall by the reaper."""
+        await self._patch(updated_at=utcnow())
+
     async def finish(self, status: str, message: str | None = None) -> None:
+        """Record a terminal status — but only if the job is still ``running``.
+
+        A job that was cleaned up manually or reaped as stalled is already
+        terminal; we must not resurrect it to ``done`` just because the
+        (now-cancelled) task happened to reach the end first. The guard is a
+        single atomic conditional UPDATE (``WHERE status='running'``) so it
+        cannot race a concurrent cleanup/reaper write.
+        """
         fields: dict = {
             "status": status,
             "finished_at": utcnow(),
@@ -123,11 +165,121 @@ class JobTracker:
         }
         if message is not None:
             fields["message"] = message[:500]
-        await self._patch(**fields)
+        async with SessionLocal() as session:
+            await session.execute(
+                update(IngestJob)
+                .where(IngestJob.id == self.job_id, IngestJob.status == "running")
+                .values(**fields)
+            )
+            await session.commit()
 
 
 def _safe_name(file_id: str) -> str:
     return "".join(c for c in file_id if c.isalnum() or c in "-_")
+
+
+_FALLBACK_META = {
+    "industry": "その他",
+    "proposalType": "その他",
+    "graphType": "なし",
+    "layoutType": "タイトル中央",
+    "tags": [],
+    "summary": "",
+    "reuseHint": "",
+}
+
+
+def _file_fingerprint(etag: str | None, size: int | None) -> str:
+    """A stable content version for a downloaded file.
+
+    Prefers the Drive etag/md5 (changes only when content changes); falls back
+    to the byte size when no etag is available (public share-link mode). The
+    value is stored on each ``Slide`` so a resumed ingest can tell an
+    already-done page apart from a stale one.
+    """
+    if etag:
+        return f"etag:{etag}"
+    if size is not None:
+        return f"size:{size}"
+    return ""
+
+
+def _page_action(
+    existing_fp: str | None, current_fp: str, has_embedding: bool
+) -> str:
+    """Decide what work a single page still needs on a (re)ingest.
+
+    * ``recompute`` — no row yet, or the stored fingerprint differs from the
+      current file content (stale): re-run Gemini metadata + embedding.
+    * ``embed_only`` — metadata is current (fingerprint matches) but the
+      embedding is missing (an earlier run was interrupted before it ran):
+      reuse the saved metadata, only recompute the embedding.
+    * ``reuse`` — metadata and embedding are both current: skip entirely.
+    """
+    if not existing_fp or existing_fp != current_fp:
+        return "recompute"
+    if not has_embedding:
+        return "embed_only"
+    return "reuse"
+
+
+def _slide_id_for(file_id: str, page_no: int) -> str:
+    return f"gd-{_safe_name(file_id)}-p{page_no:03d}"
+
+
+async def _upsert_slide_meta(
+    session,
+    file_id: str,
+    ex: SlideExtract,
+    meta: dict,
+    eff_name: str,
+    fingerprint: str,
+) -> None:
+    """Persist one page's metadata immediately (its own transaction).
+
+    Called only for ``recompute`` pages, so the (expensive) Gemini result is
+    durable the moment it's computed — a crash mid-file no longer discards
+    finished pages. The embedding is cleared to NULL here and filled in the
+    later embedding phase / backfill.
+    """
+    slide_id = _slide_id_for(file_id, ex.page_no)
+    thumb_url = (
+        f"/api/thumbnails/files/{_safe_name(file_id)}/{ex.page_no}.png"
+        if ex.thumbnail_path
+        else ""
+    )
+    now = utcnow()
+    fields = dict(
+        file_id=file_id,
+        file_name=eff_name,
+        page_no=ex.page_no,
+        slide_title=ex.title,
+        slide_text=ex.body_text,
+        industry=meta["industry"],
+        client=meta.get("client", ""),
+        proposal_type=meta["proposalType"],
+        graph_type=meta["graphType"],
+        layout_type=meta["layoutType"],
+        tags=meta["tags"],
+        summary=meta["summary"],
+        reuse_hint=meta["reuseHint"],
+        thumbnail_path=thumb_url,
+        source_url=f"{view_url(file_id)}#slide={ex.page_no}",
+        access_level="internal",
+        source_fingerprint=fingerprint,
+    )
+    row = await session.get(Slide, slide_id)
+    if row is None:
+        session.add(
+            Slide(slide_id=slide_id, embedding=None, created_at=now, **fields)
+        )
+    else:
+        for key, value in fields.items():
+            setattr(row, key, value)
+        # Metadata changed → any prior embedding is stale; the embedding phase
+        # recomputes it.
+        row.embedding = None
+    await session.commit()
 
 
 async def _ingest_one(
@@ -136,7 +288,15 @@ async def _ingest_one(
     force: bool,
     tracker: JobTracker,
 ) -> tuple[int, int]:
-    """Ingest a single DriveFile row. Returns (slides_added, slides_skipped)."""
+    """Ingest a single DriveFile row. Returns (pages_recomputed, pages_reused).
+
+    Resumable: each page's metadata is persisted as soon as it's extracted and
+    each embedding as soon as it's computed, both keyed by a content
+    fingerprint. A run interrupted mid-file (process restart, crash) re-uses
+    every page already finished for the current file content and only redoes
+    what is missing. ``force`` (admin retry) ignores reuse and recomputes all
+    pages.
+    """
     file_id = drive_file.drive_file_id
     await tracker.set_current_file(drive_file.file_name or file_id)
     await tracker.set_stage("ダウンロード中")
@@ -147,29 +307,52 @@ async def _ingest_one(
             return (0, 0)
         db_row.status = "processing"
         db_row.last_error = None
+        # An admin-chosen display name (set on a name collision) overrides
+        # Drive's raw name for what users see / search by.
+        eff_name = db_row.display_name or db_row.file_name or file_id
         await session.commit()
 
     tmp = Path(tempfile.mkdtemp(prefix="drv_"))
-    slides_added = 0
     try:
         dl: DownloadResult = await download(file_id, tmp)
         # Filename is known after download — show it in the progress UI.
         await tracker.set_current_file(dl.file_name or file_id)
+        eff_name = drive_file.display_name or dl.file_name
+        fingerprint = _file_fingerprint(dl.etag, dl.size)
 
         if (
             not force
-            and drive_file.last_size == dl.size
             and drive_file.last_ingested_at is not None
+            and _file_fingerprint(drive_file.last_etag, drive_file.last_size)
+            == fingerprint
         ):
+            # Only fast-skip when the prior pass is genuinely complete — guard
+            # against rows marked ready by older code that left some pages
+            # without an embedding (they must still be finished).
             async with session_factory() as session:
-                db_row = await session.get(DriveFile, drive_file.id)
-                if db_row:
-                    db_row.status = "ready"
-                    db_row.file_name = dl.file_name
-                    await session.commit()
-            log.info("skip unchanged %s", file_id)
-            await tracker.set_stage(None)
-            return (0, 0)
+                missing = int(
+                    (
+                        await session.execute(
+                            select(func.count())
+                            .select_from(Slide)
+                            .where(
+                                Slide.file_id == file_id,
+                                Slide.embedding.is_(None),
+                            )
+                        )
+                    ).scalar()
+                    or 0
+                )
+            if _ingest_complete(missing):
+                async with session_factory() as session:
+                    db_row = await session.get(DriveFile, drive_file.id)
+                    if db_row:
+                        db_row.status = "ready"
+                        db_row.file_name = dl.file_name
+                        await session.commit()
+                log.info("skip unchanged %s", file_id)
+                await tracker.set_stage(None)
+                return (0, 0)
 
         # Parse and render in worker thread (CPU/IO heavy)
         await tracker.set_stage("スライド解析中")
@@ -177,6 +360,7 @@ async def _ingest_one(
             extract_slides, dl.path
         )
         n_pages = len(extracts)
+        page_nos = {ex.page_no for ex in extracts}
         await tracker.set_stage("サムネイル生成中", page=0, total=n_pages)
         thumb_out = THUMB_ROOT / _safe_name(file_id)
         # Clear any prior thumbnails for this file (local + GCS) before re-render.
@@ -187,12 +371,44 @@ async def _ingest_one(
             if i < len(thumb_paths):
                 ex.thumbnail_path = thumb_paths[i]
 
-        # Gemini metadata extraction — track completion per page
+        # Decide per page what work is still needed, reusing anything already
+        # done for this exact file content (unless the admin forced a redo).
+        async with session_factory() as session:
+            existing = {
+                r.page_no: r
+                for r in (
+                    await session.execute(
+                        select(Slide).where(Slide.file_id == file_id)
+                    )
+                ).scalars().all()
+            }
+        recompute: list[SlideExtract] = []
+        reused = 0
+        for ex in extracts:
+            row = existing.get(ex.page_no)
+            action = (
+                "recompute"
+                if force
+                else _page_action(
+                    row.source_fingerprint if row else None,
+                    fingerprint,
+                    bool(row and row.embedding is not None),
+                )
+            )
+            if action == "recompute":
+                recompute.append(ex)
+            else:
+                reused += 1
+
+        # Phase 1 — Gemini metadata for pages that need it, persisted per page.
+        meta_total = len(recompute)
         meta_done = 0
-        await tracker.set_stage("メタ情報抽出中（Gemini）", page=0, total=n_pages)
+        await tracker.set_stage(
+            "メタ情報抽出中（Gemini）", page=0, total=meta_total
+        )
         sem = asyncio.Semaphore(2)
 
-        async def _meta(ex: SlideExtract) -> dict:
+        async def _meta(ex: SlideExtract) -> None:
             nonlocal meta_done
             async with sem:
                 try:
@@ -206,124 +422,181 @@ async def _ingest_one(
                     log.warning(
                         "gemini failed for %s p%d: %s", file_id, ex.page_no, e
                     )
-                    result = {
-                        "industry": "その他",
-                        "proposalType": "その他",
-                        "graphType": "なし",
-                        "layoutType": "タイトル中央",
-                        "tags": [],
-                        "summary": ex.body_text[:100],
-                        "reuseHint": "",
-                    }
+                    result = dict(_FALLBACK_META, summary=ex.body_text[:100])
+            async with session_factory() as session:
+                await _upsert_slide_meta(
+                    session, file_id, ex, result, eff_name, fingerprint
+                )
             meta_done += 1
             await tracker.set_stage(
-                "メタ情報抽出中（Gemini）", page=meta_done, total=n_pages,
+                "メタ情報抽出中（Gemini）", page=meta_done, total=meta_total,
                 throttle=True,
             )
-            return result
 
-        gemini_results = await asyncio.gather(*[_meta(e) for e in extracts])
+        await asyncio.gather(*[_meta(e) for e in recompute])
 
         # Gemini no longer needs the local PNGs — publish them to the active
         # backend (GCS in production, which also frees the ephemeral disk).
         await thumbnail_store.put_file(file_id, thumb_out)
 
-        # Embeddings (semantic search). Track completion per page.
+        # Phase 2 — embeddings for any current-page slide still missing one
+        # (freshly recomputed pages + pages whose embedding was interrupted).
+        async with session_factory() as session:
+            pending = [
+                r
+                for r in (
+                    await session.execute(
+                        select(Slide).where(
+                            Slide.file_id == file_id, Slide.embedding.is_(None)
+                        )
+                    )
+                ).scalars().all()
+                if r.page_no in page_nos
+            ]
+        embed_total = len(pending)
         embed_done = 0
-        await tracker.set_stage("ベクトル埋め込み生成中", page=0, total=n_pages)
+        await tracker.set_stage(
+            "ベクトル埋め込み生成中", page=0, total=embed_total
+        )
         embed_sem = asyncio.Semaphore(4)
 
-        async def _embed(ex: SlideExtract, meta: dict) -> list[float] | None:
+        async def _embed(slide_id: str, text: str) -> None:
             nonlocal embed_done
-            text = build_slide_embed_text(
-                title=ex.title,
-                summary=meta.get("summary", ""),
-                body_text=ex.body_text,
-                industry=meta.get("industry", ""),
-                proposal_type=meta.get("proposalType", ""),
-                graph_type=meta.get("graphType", ""),
-                layout_type=meta.get("layoutType", ""),
-                tags=meta.get("tags", []),
-                client=meta.get("client", ""),
-            )
             async with embed_sem:
                 try:
                     vec = await embed_text(text, task_type="RETRIEVAL_DOCUMENT")
                 except Exception as e:
-                    log.warning(
-                        "embed failed for %s p%d: %s", file_id, ex.page_no, e
-                    )
+                    log.warning("embed failed for %s: %s", slide_id, e)
                     vec = None
+            if vec is not None:
+                async with session_factory() as session:
+                    row = await session.get(Slide, slide_id)
+                    if row is not None:
+                        row.embedding = vec
+                        await session.commit()
             embed_done += 1
             await tracker.set_stage(
-                "ベクトル埋め込み生成中", page=embed_done, total=n_pages,
+                "ベクトル埋め込み生成中", page=embed_done, total=embed_total,
                 throttle=True,
             )
-            return vec
 
-        embeddings = await asyncio.gather(
-            *[_embed(e, m) for e, m in zip(extracts, gemini_results)]
+        await asyncio.gather(
+            *[
+                _embed(
+                    r.slide_id,
+                    build_slide_embed_text(
+                        title=r.slide_title,
+                        summary=r.summary,
+                        body_text=r.slide_text,
+                        industry=r.industry,
+                        proposal_type=r.proposal_type,
+                        graph_type=r.graph_type,
+                        layout_type=r.layout_type,
+                        tags=list(r.tags or []),
+                        client=r.client,
+                    ),
+                )
+                for r in pending
+            ]
         )
 
-        # Persist: delete existing slides for this file, insert fresh
+        # Finalize: drop pages no longer in the deck, refresh the display name
+        # on reused rows, and mark the file ready — but only if EVERY current
+        # page is complete (has an embedding). If any embedding is still missing
+        # (e.g. a swallowed Gemini error), leave the file resumable and do NOT
+        # set the unchanged-skip markers, so a later run finishes it instead of
+        # treating it as fully ingested.
         await tracker.set_stage("DB保存中", page=n_pages, total=n_pages)
         async with session_factory() as session:
-            db_row = await session.get(DriveFile, drive_file.id)
-            # An admin-chosen display name (set on a name collision) overrides
-            # Drive's raw name for what users see / search by.
-            eff_name = (
-                db_row.display_name if db_row and db_row.display_name else dl.file_name
-            )
-            await session.execute(
-                delete(Slide).where(Slide.file_id == file_id)
-            )
-            now = utcnow()
-            for ex, meta, emb in zip(extracts, gemini_results, embeddings):
-                slide_id = f"gd-{_safe_name(file_id)}-p{ex.page_no:03d}"
-                thumb_url = (
-                    f"/api/thumbnails/files/{_safe_name(file_id)}/{ex.page_no}.png"
-                    if ex.thumbnail_path
-                    else ""
-                )
-                session.add(
-                    Slide(
-                        slide_id=slide_id,
-                        file_id=file_id,
-                        file_name=eff_name,
-                        page_no=ex.page_no,
-                        slide_title=ex.title,
-                        slide_text=ex.body_text,
-                        industry=meta["industry"],
-                        client=meta.get("client", ""),
-                        proposal_type=meta["proposalType"],
-                        graph_type=meta["graphType"],
-                        layout_type=meta["layoutType"],
-                        tags=meta["tags"],
-                        summary=meta["summary"],
-                        reuse_hint=meta["reuseHint"],
-                        thumbnail_path=thumb_url,
-                        source_url=f"{view_url(file_id)}#slide={ex.page_no}",
-                        access_level="internal",
-                        embedding=emb,
-                        created_at=now,
-                        updated_at=now,
+            if page_nos:
+                await session.execute(
+                    delete(Slide).where(
+                        Slide.file_id == file_id,
+                        Slide.page_no.notin_(page_nos),
                     )
                 )
-                slides_added += 1
-
+            else:
+                await session.execute(
+                    delete(Slide).where(Slide.file_id == file_id)
+                )
+            now = utcnow()
+            db_row = await session.get(DriveFile, drive_file.id)
             if db_row:
-                db_row.status = "ready"
-                db_row.last_size = dl.size
-                db_row.last_etag = dl.etag
-                db_row.last_ingested_at = now
-                db_row.last_error = None
+                eff_name = db_row.display_name or dl.file_name
+            # Reused rows may carry an old display name (admin rename); refresh.
+            await session.execute(
+                update(Slide)
+                .where(Slide.file_id == file_id)
+                .values(file_name=eff_name)
+            )
+            slide_count = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(Slide)
+                        .where(Slide.file_id == file_id)
+                    )
+                ).scalar()
+                or 0
+            )
+            missing_embeddings = int(
+                (
+                    await session.execute(
+                        select(func.count())
+                        .select_from(Slide)
+                        .where(
+                            Slide.file_id == file_id,
+                            Slide.embedding.is_(None),
+                        )
+                    )
+                ).scalar()
+                or 0
+            )
+            complete = _ingest_complete(missing_embeddings)
+            if db_row:
                 # Keep the raw Drive name; display_name (if any) is preserved.
                 db_row.file_name = dl.file_name
-                db_row.slide_count = slides_added
+                db_row.slide_count = slide_count
+                if complete:
+                    db_row.status = "ready"
+                    db_row.last_size = dl.size
+                    db_row.last_etag = dl.etag
+                    db_row.last_ingested_at = now
+                    db_row.last_error = None
+                else:
+                    # Resumable, not fully ingested: do not set the
+                    # unchanged-skip markers (last_ingested_at/size/etag).
+                    db_row.status = "pending"
+                    db_row.last_error = (
+                        f"埋め込み未完了: {missing_embeddings}ページ"
+                    )[:500]
             await session.commit()
-        log.info("ingested %s -> %d slides", file_id, slides_added)
+        log.info(
+            "ingested %s -> %d slides (recomputed=%d reused=%d missing_embed=%d)",
+            file_id, slide_count, len(recompute), reused, missing_embeddings,
+        )
         await tracker.set_stage(None)
-        return (slides_added, 0)
+        if not complete:
+            raise IncompleteIngest(
+                f"{file_id}: {missing_embeddings} ページの埋め込みが未完了です"
+            )
+        return (len(recompute), reused)
+    except IncompleteIngest:
+        # Status was already set to resumable ``pending`` above; do not let the
+        # generic handler overwrite it to ``failed``. Re-raise so the run loop
+        # reports this file as not-done (it resumes on a later run).
+        raise
+    except asyncio.CancelledError:
+        # Cleaned up / reaped mid-file. Pages done so far are already persisted;
+        # reset the file to pending so a later run resumes it cheaply.
+        log.info("ingest cancelled for %s", file_id)
+        with suppress(Exception):
+            async with session_factory() as session:
+                db_row = await session.get(DriveFile, drive_file.id)
+                if db_row and db_row.status == "processing":
+                    db_row.status = "pending"
+                    await session.commit()
+        raise
     except Exception as e:
         log.exception("ingest failed for %s", file_id)
         async with session_factory() as session:
@@ -372,6 +645,19 @@ async def run_ingest(
         job_id = await _create_job(kind, actor_label)
 
     tracker = JobTracker(job_id)
+
+    async def _heartbeat_loop() -> None:
+        # Periodically refresh the job's heartbeat so a long single stage
+        # doesn't trip the stalled-job reaper. Dies with the task (and thus
+        # the process), so a real crash still goes stale and gets reaped.
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await tracker.heartbeat()
+            except Exception:  # noqa: BLE001
+                log.debug("heartbeat write failed", exc_info=True)
+
+    heartbeat = asyncio.create_task(_heartbeat_loop())
     try:
         async with SessionLocal() as session:
             stmt = select(DriveFile)
@@ -393,16 +679,127 @@ async def run_ingest(
             try:
                 await _ingest_one(SessionLocal, row, force=force, tracker=tracker)
                 await tracker.file_done()
+            except asyncio.CancelledError:
+                # Cleaned up / reaped mid-file: stop owning the file and let
+                # cancellation propagate (the job row is already terminal).
+                async with _ACTIVE_LOCK:
+                    _ACTIVE_FILES.discard(row.drive_file_id)
+                raise
             except Exception as e:  # noqa: BLE001
                 await tracker.file_failed(f"{row.drive_file_id}: {e}")
             finally:
                 async with _ACTIVE_LOCK:
                     _ACTIVE_FILES.discard(row.drive_file_id)
         await tracker.finish("done")
+    except asyncio.CancelledError:
+        log.info("ingest run %d cancelled", job_id)
+        raise
     except Exception as e:  # noqa: BLE001
         log.exception("ingest run failed")
         await tracker.finish("failed", message=str(e))
+    finally:
+        heartbeat.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat
     return {"jobId": job_id}
+
+
+# A running job whose progress heartbeat (``updated_at``) is older than this is
+# treated as stalled (crashed mid-run) and reaped so it stops blocking
+# single-flight scheduling.
+STALE_JOB_SECONDS = 15 * 60
+
+
+def _is_stalled(updated_at, now, threshold_seconds: int) -> bool:
+    """True if a running job's last heartbeat is older than the threshold."""
+    if updated_at is None:
+        return False
+    return (now - updated_at).total_seconds() > threshold_seconds
+
+
+def _clear_job_progress(job: IngestJob, status: str, message: str) -> None:
+    job.status = status
+    job.finished_at = utcnow()
+    job.message = message[:500]
+    job.current_file = None
+    job.stage = None
+    job.current_file_page = None
+    job.current_file_total = None
+
+
+async def reap_orphaned_jobs() -> dict:
+    """At startup, mark every ``running`` job failed and reset stuck files.
+
+    A single warm instance owns ingest (see ``_ACTIVE_FILES``), so on process
+    start any job still ``running`` is necessarily orphaned — its in-process
+    task died with the previous process and will never resume on its own.
+    Files left ``processing`` are reset to ``pending`` so the next run picks
+    them up (the per-page persistence makes that resume cheap).
+    """
+    async with SessionLocal() as session:
+        jobs = (
+            await session.execute(
+                select(IngestJob).where(IngestJob.status == "running")
+            )
+        ).scalars().all()
+        for job in jobs:
+            _clear_job_progress(job, "failed", "中断されました（再起動）")
+        files = (
+            await session.execute(
+                select(DriveFile).where(DriveFile.status == "processing")
+            )
+        ).scalars().all()
+        for f in files:
+            f.status = "pending"
+        if jobs or files:
+            await session.commit()
+    if jobs or files:
+        log.info(
+            "reaped orphaned jobs=%d, reset processing files=%d",
+            len(jobs), len(files),
+        )
+    return {"jobs": len(jobs), "files": len(files)}
+
+
+async def reap_stalled_jobs(threshold_seconds: int = STALE_JOB_SECONDS) -> int:
+    """Fail any ``running`` job whose heartbeat is older than the threshold."""
+    now = utcnow()
+    reaped = 0
+    async with SessionLocal() as session:
+        jobs = (
+            await session.execute(
+                select(IngestJob).where(IngestJob.status == "running")
+            )
+        ).scalars().all()
+        stalled_ids: list[int] = []
+        for job in jobs:
+            if _is_stalled(job.updated_at, now, threshold_seconds):
+                _clear_job_progress(
+                    job, "failed", "停滞のため中断（進捗が一定時間ありません）"
+                )
+                stalled_ids.append(job.id)
+                reaped += 1
+        if reaped:
+            await session.commit()
+    for jid in stalled_ids:
+        _cancel_task(jid)
+    if reaped:
+        log.info("reaped %d stalled ingest job(s)", reaped)
+    return reaped
+
+
+async def cleanup_job(job_id: int) -> bool:
+    """Admin action: mark a single running job as interrupted. No-op if the
+    job is missing or already finished."""
+    async with SessionLocal() as session:
+        job = await session.get(IngestJob, job_id)
+        if job is None or job.status != "running":
+            return False
+        _clear_job_progress(job, "failed", "手動で中断されました")
+        await session.commit()
+    _cancel_task(job_id)
+    log.info("manually cleaned up ingest job %d", job_id)
+    return True
 
 
 async def _count_running(kind: str | None = None) -> int:
@@ -457,10 +854,13 @@ async def schedule_ingest_background(
     zero running jobs cannot both start one.
     """
     async with _SCHEDULE_LOCK:
+        # Clear any crashed/stalled run first so a dead job can't permanently
+        # block single-flight scheduling.
+        await reap_stalled_jobs()
         if kind in ("manual", "sync") and await _count_running(kind) > 0:
             return False
         job_id = await _create_job(kind, actor_label)
-    asyncio.create_task(
+    task = asyncio.create_task(
         run_ingest(
             only_ids=only_ids,
             force=force,
@@ -469,6 +869,156 @@ async def schedule_ingest_background(
             job_id=job_id,
         )
     )
+    _RUNNING_TASKS[job_id] = task
+    task.add_done_callback(lambda _t, jid=job_id: _RUNNING_TASKS.pop(jid, None))
+    return True
+
+
+async def _regen_thumbnails_one(
+    session_factory, drive_file: DriveFile, *, tracker: JobTracker
+) -> int:
+    """Re-render and re-publish ONLY the thumbnails for one file.
+
+    Unlike a full re-ingest this never touches Gemini metadata or embeddings —
+    it downloads the deck, renders the page PNGs, and republishes them to the
+    active thumbnail backend (local disk or GCS). Used to recover thumbnails
+    that failed to publish (e.g. a transient GCS/IAM problem) without paying for
+    a metadata recompute. Returns the number of pages rendered.
+    """
+    file_id = drive_file.drive_file_id
+    await tracker.set_current_file(drive_file.display_name or drive_file.file_name or file_id)
+    await tracker.set_stage("ダウンロード中")
+
+    tmp = Path(tempfile.mkdtemp(prefix="thumb_"))
+    try:
+        dl: DownloadResult = await download(file_id, tmp)
+        await tracker.set_current_file(dl.file_name or file_id)
+
+        # Thumbnail-only regen must NOT change what users read: it republishes
+        # images for ALREADY-ingested, UNCHANGED content. If the file was never
+        # fully ingested, or its content changed since the last ingest, the
+        # stored metadata/embeddings would no longer match the new images — so
+        # refuse and tell the admin to run a full re-ingest instead.
+        current_fp = _file_fingerprint(dl.etag, dl.size)
+        stored_fp = _file_fingerprint(drive_file.last_etag, drive_file.last_size)
+        if drive_file.last_ingested_at is None or current_fp != stored_fp:
+            raise RuntimeError(
+                "ファイル内容が変更されています（または未取り込み）。"
+                "サムネイル再生成ではなく「再取り込み」を実行してください"
+            )
+
+        await tracker.set_stage("サムネイル生成中")
+        thumb_out = THUMB_ROOT / _safe_name(file_id)
+        await thumbnail_store.clear_file(file_id)
+        thumb_paths = await asyncio.to_thread(render_thumbnails, dl.path, thumb_out)
+        n_pages = len(thumb_paths)
+
+        await tracker.set_stage("サムネイル保存中", page=0, total=n_pages)
+        await thumbnail_store.put_file(file_id, thumb_out)
+
+        # Re-attach canonical thumbnail URLs to existing slide rows. Page
+        # numbering is stable (1..n), so the URLs are unchanged — but a row that
+        # previously failed to get a thumbnail may have an empty path; fix those.
+        async with session_factory() as session:
+            slides = (
+                await session.execute(
+                    select(Slide).where(Slide.file_id == file_id)
+                )
+            ).scalars().all()
+            for s in slides:
+                if s.page_no <= n_pages:
+                    url = f"/api/thumbnails/files/{_safe_name(file_id)}/{s.page_no}.png"
+                    if s.thumbnail_path != url:
+                        s.thumbnail_path = url
+            await session.commit()
+        await tracker.set_stage(None)
+        log.info("regenerated %d thumbnails for %s", n_pages, file_id)
+        return n_pages
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+async def run_thumbnail_regen(
+    drive_file_id: int,
+    *,
+    actor_label: str = "",
+    job_id: int | None = None,
+) -> dict:
+    """Run a thumbnail-only regeneration for a single drive_file as a job.
+
+    Reuses the ``ingest_jobs`` progress machinery (kind ``thumbs``) so the admin
+    UI shows live progress, and the ``_ACTIVE_FILES`` guard so it never collides
+    with an ingest of the same file.
+    """
+    if job_id is None:
+        job_id = await _create_job("thumbs", actor_label)
+    tracker = JobTracker(job_id)
+
+    async def _heartbeat_loop() -> None:
+        # Keep the job's heartbeat fresh so a slow download/render isn't
+        # mistaken for a stall by the reaper.
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await tracker.heartbeat()
+            except Exception:  # noqa: BLE001
+                log.debug("regen heartbeat write failed", exc_info=True)
+
+    heartbeat = asyncio.create_task(_heartbeat_loop())
+    try:
+        async with SessionLocal() as session:
+            row = await session.get(DriveFile, drive_file_id)
+        if row is None:
+            await tracker.finish("failed", message="ファイルが見つかりません")
+            return {"jobId": job_id}
+        await tracker.set_total(1)
+
+        async with _ACTIVE_LOCK:
+            owned = row.drive_file_id in _ACTIVE_FILES
+            if not owned:
+                _ACTIVE_FILES.add(row.drive_file_id)
+        if owned:
+            await tracker.finish(
+                "failed", message="このファイルは処理中です。完了後に再試行してください"
+            )
+            return {"jobId": job_id}
+        try:
+            await _regen_thumbnails_one(SessionLocal, row, tracker=tracker)
+            await tracker.file_done()
+            await tracker.finish("done")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.exception("thumbnail regen failed for %s", row.drive_file_id)
+            await tracker.file_failed(f"{row.drive_file_id}: {e}")
+            await tracker.finish("failed", message=str(e))
+        finally:
+            async with _ACTIVE_LOCK:
+                _ACTIVE_FILES.discard(row.drive_file_id)
+    except asyncio.CancelledError:
+        log.info("thumbnail regen job %d cancelled", job_id)
+        raise
+    finally:
+        heartbeat.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat
+    return {"jobId": job_id}
+
+
+async def schedule_thumbnail_regen_background(
+    drive_file_id: int, *, actor_label: str = ""
+) -> bool:
+    """Kick off a thumbnail-only regen as a background task. Always allowed to
+    stack (like per-file retries); the ``_ACTIVE_FILES`` guard prevents a
+    same-file collision."""
+    async with _SCHEDULE_LOCK:
+        await reap_stalled_jobs()
+        job_id = await _create_job("thumbs", actor_label)
+    task = asyncio.create_task(
+        run_thumbnail_regen(drive_file_id, actor_label=actor_label, job_id=job_id)
+    )
+    _RUNNING_TASKS[job_id] = task
+    task.add_done_callback(lambda _t, jid=job_id: _RUNNING_TASKS.pop(jid, None))
     return True
 
 
