@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import require_admin
 from db import AddLog, DriveFile, DriveFolder, Slide, User, get_session, utcnow
 from drive import fetch_file_name, list_folder_files, parse_share_input, view_url
-from ingest import JOB, schedule_ingest_background
+from ingest import list_jobs, schedule_ingest_background
 
 log = logging.getLogger("api.admin")
 router = APIRouter(
@@ -197,8 +197,13 @@ async def delete_drive_file(
     from sqlalchemy import delete as sql_delete
 
     await session.execute(sql_delete(Slide).where(Slide.file_id == row.drive_file_id))
+    drive_file_id_str = row.drive_file_id
     await session.delete(row)
     await session.commit()
+    # Drop this file's thumbnails (local + GCS) so storage isn't leaked.
+    import thumbnail_store
+
+    await thumbnail_store.clear_file(drive_file_id_str)
     return {"deleted": True}
 
 
@@ -508,12 +513,15 @@ async def retry_drive_file(
     drive_file_id: int,
     body: RetryBody | None = None,
     session: AsyncSession = Depends(get_session),
+    actor_label: str = "",
 ):
     row = await session.get(DriveFile, drive_file_id)
     if not row:
         raise HTTPException(status_code=404, detail="not found")
-    started = schedule_ingest_background(only_ids=[row.id], force=True)
-    return {"started": started, "snapshot": JOB.snapshot()}
+    started = await schedule_ingest_background(
+        only_ids=[row.id], force=True, kind="retry", actor_label=actor_label
+    )
+    return {"started": started, "jobs": await list_jobs()}
 
 
 class RunBody(BaseModel):
@@ -521,15 +529,17 @@ class RunBody(BaseModel):
 
 
 @ingest_router.post("/run")
-async def run_now(body: RunBody | None = None):
+async def run_now(body: RunBody | None = None, actor_label: str = ""):
     force = bool(body and body.force)
-    started = schedule_ingest_background(only_ids=None, force=force)
-    return {"started": started, "snapshot": JOB.snapshot()}
+    started = await schedule_ingest_background(
+        only_ids=None, force=force, kind="manual", actor_label=actor_label
+    )
+    return {"started": started, "jobs": await list_jobs()}
 
 
 @ingest_router.get("/status")
 async def status():
-    return JOB.snapshot()
+    return {"jobs": await list_jobs()}
 
 
 # ─────────────────────────────────────────────────────────────────────
