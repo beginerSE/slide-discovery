@@ -12,13 +12,16 @@ selected by :func:`config.use_gcs_thumbnails` (keyed off ``THUMBNAIL_BUCKET``):
   so persisting thumbnails in GCS lets them survive restarts and be shared
   across instances.
 
-The ingest pipeline always renders to a local temp dir first (Gemini needs the
-file on disk); :func:`put_file` then mirrors those PNGs to the active backend.
+The ingest pipeline always renders to a local *staging* dir first (Gemini needs
+the file on disk); :func:`publish_file` then atomically swaps those PNGs in as
+the live thumbnails, removing the previous ones only AFTER the new ones are
+durably in place — so a failed render/publish never wipes existing thumbnails.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -30,6 +33,14 @@ log = logging.getLogger("ingest.thumbnails")
 THUMB_ROOT = Path(__file__).parent / "data" / "thumbnails"
 
 _GCS_SCOPES = ["https://www.googleapis.com/auth/devstorage.read_write"]
+
+# Hard ceiling for a single GCS operation (upload/list/delete) so a misconfigured
+# bucket / missing IAM grant / network stall can't hang the ingest pipeline. The
+# per-blob client timeout caps the underlying request; the asyncio.wait_for cap
+# stops the whole batch (and returns control to ingest) even if the worker thread
+# keeps retrying in the background.
+_GCS_OP_TIMEOUT = 30.0       # seconds, per underlying GCS request
+_GCS_BATCH_TIMEOUT = 180.0   # seconds, whole upload/clear batch
 
 
 def safe_name(file_id: str) -> str:
@@ -61,63 +72,175 @@ def _gcs_bucket():
 
 # --- Sync workers (run via asyncio.to_thread) ------------------------------
 
-def _gcs_upload_dir(safe: str, local_dir: Path) -> None:
+def _gcs_publish(safe: str, staging_dir: Path) -> None:
+    """Two-phase publish to GCS: upload the freshly-rendered PNGs first, then
+    prune any stale blobs (pages no longer present, e.g. a now-shorter deck).
+
+    The old blobs are deleted ONLY after every new upload succeeds, so an upload
+    failure (raised here, caught by :func:`publish_file`) leaves the previous
+    thumbnails fully intact in the bucket.
+    """
     bucket = _gcs_bucket()
-    for png in sorted(local_dir.glob("*.png")):
+    new_pages: set[str] = set()
+    for png in sorted(staging_dir.glob("*.png")):
         page_no = png.stem
+        new_pages.add(page_no)
         blob = bucket.blob(f"{config.thumbnail_prefix()}/{safe}/{page_no}.png")
         blob.cache_control = "public, max-age=300"
-        blob.upload_from_filename(str(png), content_type="image/png")
+        blob.upload_from_filename(
+            str(png), content_type="image/png", timeout=_GCS_OP_TIMEOUT
+        )
+    # Uploads succeeded — safe to drop blobs for pages that no longer exist.
+    prefix = f"{config.thumbnail_prefix()}/{safe}/"
+    for blob in bucket.list_blobs(prefix=prefix, timeout=_GCS_OP_TIMEOUT):
+        if Path(blob.name).stem not in new_pages:
+            blob.delete(timeout=_GCS_OP_TIMEOUT)
 
 
 def _gcs_get(safe: str, page_no: int) -> bytes | None:
     blob = _gcs_bucket().blob(_blob_name(safe, page_no))
-    if not blob.exists():
+    if not blob.exists(timeout=_GCS_OP_TIMEOUT):
         return None
-    return blob.download_as_bytes()
+    return blob.download_as_bytes(timeout=_GCS_OP_TIMEOUT)
 
 
 def _gcs_delete_prefix(safe: str) -> None:
     bucket = _gcs_bucket()
     prefix = f"{config.thumbnail_prefix()}/{safe}/"
-    for blob in bucket.list_blobs(prefix=prefix):
-        blob.delete()
+    for blob in bucket.list_blobs(prefix=prefix, timeout=_GCS_OP_TIMEOUT):
+        blob.delete(timeout=_GCS_OP_TIMEOUT)
 
 
 # --- Public async API -------------------------------------------------------
 
 async def clear_file(file_id: str) -> None:
-    """Remove all thumbnails for a file (before re-ingest / on delete)."""
+    """Remove all thumbnails for a file (before re-ingest / on delete).
+
+    Resilient by design: a GCS failure/timeout is logged and swallowed so the
+    ingest pipeline keeps going. Worst case a few stale blobs linger; they are
+    overwritten on the next successful publish.
+    """
     safe = safe_name(file_id)
     local_dir = THUMB_ROOT / safe
     if local_dir.exists():
         shutil.rmtree(local_dir, ignore_errors=True)
     if config.use_gcs_thumbnails():
         try:
-            await asyncio.to_thread(_gcs_delete_prefix, safe)
+            await asyncio.wait_for(
+                asyncio.to_thread(_gcs_delete_prefix, safe), _GCS_BATCH_TIMEOUT
+            )
         except Exception:
             log.exception("failed clearing GCS thumbnails for %s", file_id)
 
 
-async def put_file(file_id: str, local_dir: Path) -> None:
-    """Publish the rendered PNGs in ``local_dir`` to the active backend.
+def _local_swap(safe: str, staging_dir: Path) -> None:
+    """Atomically make ``staging_dir`` the live ``THUMB_ROOT/safe`` directory.
 
-    Local backend: PNGs already live under ``THUMB_ROOT`` — nothing to do.
-    GCS backend: upload each page, then drop the local copies so Cloud Run's
-    ephemeral disk doesn't fill up.
+    The old live dir is moved aside first and only deleted AFTER the new dir is
+    renamed into place; on a rename failure it is restored. ``staging_dir`` must
+    live on the same filesystem as ``THUMB_ROOT`` (renames can't cross devices)
+    — the ingest pipeline renders it under ``THUMB_ROOT`` for exactly this.
     """
-    if not config.use_gcs_thumbnails():
-        return
+    if not any(staging_dir.glob("*.png")):
+        raise RuntimeError(f"no rendered thumbnails to publish in {staging_dir}")
+    THUMB_ROOT.mkdir(parents=True, exist_ok=True)
+    live = THUMB_ROOT / safe
+    backup = THUMB_ROOT / f"{safe}.old"
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+    had_old = live.exists()
+    if had_old:
+        os.rename(live, backup)
+    try:
+        os.rename(staging_dir, live)
+    except Exception:
+        if had_old:  # restore the previous thumbnails on failure
+            os.rename(backup, live)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+
+
+async def publish_file(file_id: str, staging_dir: Path) -> bool:
+    """Publish the freshly-rendered PNGs in ``staging_dir`` as the live
+    thumbnails for ``file_id`` — two-phase so a failure keeps the old images.
+
+    Local backend: atomically swap ``staging_dir`` into ``THUMB_ROOT/safe``; the
+    previous dir is only removed once the new one is in place.
+    GCS backend: upload the new pages, then prune stale blobs — old blobs are
+    deleted only after the uploads succeed. The local copies are then dropped so
+    Cloud Run's ephemeral disk doesn't fill up.
+
+    Resilient by design: a GCS failure/timeout is logged and swallowed (returns
+    ``False``) instead of raising, so a misconfigured bucket / missing IAM grant
+    can never hang or abort an ingest, and the previous thumbnails (old GCS
+    blobs) stay intact. On GCS failure the new renders are kept locally so
+    same-instance serving via :func:`get` still works as a fallback. Returns
+    ``True`` when the thumbnails are durably published.
+    """
     safe = safe_name(file_id)
-    await asyncio.to_thread(_gcs_upload_dir, safe, local_dir)
-    shutil.rmtree(local_dir, ignore_errors=True)
+    # Hard invariant: never publish an empty render. With no new PNGs the GCS
+    # prune would delete EVERY existing blob (and a local swap would be empty),
+    # wiping the file's thumbnails — exactly what two-phase publish must prevent.
+    if not any(staging_dir.glob("*.png")):
+        log.warning(
+            "refusing to publish empty thumbnail render for %s (keeping old)",
+            file_id,
+        )
+        return False
+    if not config.use_gcs_thumbnails():
+        try:
+            await asyncio.to_thread(_local_swap, safe, staging_dir)
+            return True
+        except Exception:
+            log.exception("failed publishing local thumbnails for %s", file_id)
+            return False
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(_gcs_publish, safe, staging_dir), _GCS_BATCH_TIMEOUT
+        )
+    except Exception:
+        log.exception("failed publishing GCS thumbnails for %s", file_id)
+        # Keep the new renders locally so get()'s local fallback can serve them
+        # on this instance; old GCS blobs are left intact (not pruned).
+        try:
+            await asyncio.to_thread(_local_swap, safe, staging_dir)
+        except Exception:
+            log.exception("failed keeping local fallback for %s", file_id)
+        return False
+    # Published durably to GCS — drop local copies (staging + any old live dir).
+    shutil.rmtree(staging_dir, ignore_errors=True)
+    shutil.rmtree(THUMB_ROOT / safe, ignore_errors=True)
+    return True
 
 
 async def get(file_id: str, page_no: int) -> bytes | None:
-    """Return PNG bytes for a slide page, or ``None`` if absent."""
+    """Return PNG bytes for a slide page, or ``None`` if absent.
+
+    In GCS mode the bucket is the source of truth, but we fall back to a local
+    copy (kept by ``publish_file`` when a publish failed) on a GCS miss/error —
+    so a transient bucket/IAM problem degrades gracefully instead of 404-ing
+    pages that were rendered on this instance.
+    """
     safe = safe_name(file_id)
     if config.use_gcs_thumbnails():
-        return await asyncio.to_thread(_gcs_get, safe, page_no)
+        try:
+            data = await asyncio.wait_for(
+                asyncio.to_thread(_gcs_get, safe, page_no), _GCS_OP_TIMEOUT
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Log the actual cause (e.g. 403/ADC auth failures) so a broken
+            # bucket/IAM grant is diagnosable from the logs, not just a generic
+            # "trying local" line. Read path is hot, so log the message rather
+            # than a full traceback to avoid flooding on a persistent failure.
+            log.warning(
+                "GCS thumbnail read failed for %s p%s (%s); trying local",
+                file_id, page_no, exc,
+            )
+            data = None
+        if data is not None:
+            return data
+        # Fall through to the local copy as a best-effort fallback.
     p = THUMB_ROOT / safe / f"{page_no}.png"
     if not p.exists():
         return None
