@@ -1,0 +1,51 @@
+{% import "_macros.html" as m %}
+{% set kind_map = {"manual": "全件取り込み", "retry": "再取り込み", "sync": "自動同期"} %}
+{% set jstatus_map = {
+  "running": ("実行中", "badge", "loader"),
+  "done": ("完了", "badge-primary", "check"),
+  "failed": ("失敗", "badge-destructive", "alert")
+} %}
+{% if jobs %}
+<div class="card">
+  <div class="card-header">
+    <div class="text-sm font-semibold row gap-2">{{ m.icon("layers") }}<span>取り込みジョブ</span></div>
+  </div>
+  <div class="card-body" style="display:flex;flex-direction:column;gap:0.75rem">
+    {% for j in jobs %}
+    {% set total = j.total or 0 %}
+    {% set done = (j.processed or 0) + (j.failed or 0) %}
+    {% set running = j.status == "running" %}
+    {% set pct = (done / total * 100) | round | int if total > 0 else (0 if running else 100) %}
+    {% set js = jstatus_map.get(j.status, ("", "badge-outline", "")) %}
+    <div class="job-row">
+      <div class="row between wrap gap-2">
+        <div class="row gap-2" style="align-items:center">
+          <span class="badge {{ js[1] }}">{{ m.icon("loader", "spin") if running else m.icon(js[2]) }}{{ js[0] }}</span>
+          <span class="font-medium text-sm">{{ kind_map.get(j.kind, j.kind) }}</span>
+          {% if j.actorLabel %}<span class="text-xs text-muted">{{ j.actorLabel }}</span>{% endif %}
+        </div>
+        <span class="text-xs text-muted">
+          {{ j.processed or 0 }} / {{ total }} 件完了{% if j.failed %}・失敗 {{ j.failed }} 件{% endif %}
+        </span>
+      </div>
+      <div class="progress-track mt-1"><div class="progress-bar" style="width:{{ pct }}%"></div></div>
+      {% if running and j.currentFile %}
+      <div class="text-xs text-muted space-y-sm mt-1">
+        <p class="truncate"><span class="font-medium" style="color:hsl(var(--foreground))">処理中:</span> {{ j.currentFile }}</p>
+        {% if j.stage %}
+        <p>{{ j.stage }}{% if j.currentFileTotal and j.currentFileTotal > 0 %}（{{ j.currentFilePage or 0 }} / {{ j.currentFileTotal }} ページ）{% endif %}</p>
+        {% if j.currentFileTotal and j.currentFileTotal > 0 %}
+        <div class="progress-track sub"><div class="progress-bar sub" style="width:{{ ((j.currentFilePage or 0) / j.currentFileTotal * 100) | round | int }}%"></div></div>
+        {% endif %}
+        {% endif %}
+      </div>
+      {% endif %}
+      {% if j.message %}<p class="text-xs text-destructive truncate mt-1">⚠ {{ j.message }}</p>{% endif %}
+      <div class="text-xs text-muted mt-1">
+        {% if j.finishedAt %}{{ j.finishedAt[:16] | replace("T", " ") | replace("-", "/") }} 終了{% elif j.startedAt %}{{ j.startedAt[:16] | replace("T", " ") | replace("-", "/") }} 開始{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
