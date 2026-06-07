@@ -1,41 +1,9 @@
 {% import "_macros.html" as m %}
-{% set running = status.status == "running" %}
-{% set total = status.total or 0 %}
-{% set processed = status.processed or 0 %}
-{% set failed = status.failed or 0 %}
-{% set pct = ((processed + failed) / total * 100) | round | int if total > 0 else 0 %}
 <button class="btn btn-lg" hx-post="/ui/admin/run" hx-target="#admin-run" hx-swap="innerHTML"
-  {% if running or files_count == 0 %}disabled{% endif %}>
-  {% if running %}{{ m.icon("loader", "spin") }}{% else %}{{ m.icon("play") }}{% endif %}今すぐ全件取り込み
+  {% if manual_running or files_count == 0 %}disabled{% endif %}>
+  {% if manual_running %}{{ m.icon("loader", "spin") }}{% else %}{{ m.icon("play") }}{% endif %}今すぐ全件取り込み
 </button>
 
-<div id="admin-progress" hx-swap-oob="true">
-  {% if running or status.finishedAt %}
-  <div class="card">
-    <div class="card-header">
-      <div class="text-sm font-semibold row gap-2">{{ m.icon("loader", "spin" if running else "") }}<span>直近のジョブ</span></div>
-    </div>
-    <div class="card-body space-y-sm">
-      <div class="row gap-3 text-sm wrap">
-        <span class="font-medium">状態:</span><span>{{ status.status }}</span>
-        <span class="text-muted">ファイル {{ processed }} / {{ total }} 件完了、失敗 {{ failed }} 件</span>
-      </div>
-      <div class="progress-track"><div class="progress-bar" style="width:{{ pct }}%"></div></div>
-      {% if status.currentFile %}
-      <div class="text-xs text-muted space-y-sm">
-        <p class="truncate"><span class="font-medium" style="color:hsl(var(--foreground))">処理中ファイル:</span> {{ status.currentFile }}</p>
-        {% if status.stage or status.currentFileTotal is not none %}
-        <p><span class="font-medium" style="color:hsl(var(--foreground))">ステップ:</span> {{ status.stage or "—" }}
-          {% if status.currentFileTotal and status.currentFileTotal > 0 %}（{{ status.currentFilePage or 0 }} / {{ status.currentFileTotal }} ページ完了）{% endif %}
-        </p>
-        {% endif %}
-        {% if status.currentFileTotal and status.currentFileTotal > 0 %}
-        <div class="progress-track sub"><div class="progress-bar sub" style="width:{{ ((status.currentFilePage or 0) / status.currentFileTotal * 100) | round | int }}%"></div></div>
-        {% endif %}
-      </div>
-      {% endif %}
-      {% if status.message %}<p class="text-xs text-destructive">{{ status.message }}</p>{% endif %}
-    </div>
-  </div>
-  {% endif %}
+<div id="admin-jobs" hx-swap-oob="true">
+  {% include "_admin_jobs.html" %}
 </div>
