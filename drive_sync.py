@@ -160,7 +160,9 @@ async def sync_drive_changes() -> dict:
 
     unique_ids = sorted(set(reingest_ids))
     if unique_ids:
-        schedule_ingest_background(only_ids=unique_ids, force=False)
+        await schedule_ingest_background(
+            only_ids=unique_ids, force=False, kind="sync", actor_label="自動同期"
+        )
 
     return {
         "ran": True,
