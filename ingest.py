@@ -249,6 +249,72 @@ def _slide_id_for(file_id: str, page_no: int) -> str:
     return f"gd-{_safe_name(file_id)}-p{page_no:03d}"
 
 
+# How often the render progress poller samples the staging dir / refreshes the
+# job stage. Module-level so tests can shrink it for fast deterministic polling.
+_RENDER_POLL_SECONDS = 2.0
+
+
+async def _render_thumbs_tracked(
+    src_path: Path,
+    thumb_out: Path,
+    tracker: JobTracker,
+    total: int | None,
+) -> list[Path]:
+    """Render PPTX thumbnails in a worker thread while keeping the job's stage
+    live, so a large deck does not look frozen in the UI.
+
+    ``render_thumbnails`` is one long blocking call (soffice PPTX->PDF, then
+    pdftoppm PDF->PNG) that reports nothing on its own — for a deck with many
+    slides the progress sat motionless for the whole render. We poll
+    ``thumb_out`` for the PNGs pdftoppm writes there: while soffice is still
+    producing the PDF none exist yet, so we show an elapsed-time "converting"
+    message; once pages start landing we advance the per-page counter. Each
+    write also bumps ``updated_at`` (onupdate), keeping the stalled-job reaper
+    from mistaking a slow render for a crash.
+    """
+    start = time.monotonic()
+    stop = asyncio.Event()
+
+    async def _poll() -> None:
+        while not stop.is_set():
+            try:
+                count = (
+                    len(list(thumb_out.glob("*.png"))) if thumb_out.exists() else 0
+                )
+            except OSError:
+                count = 0
+            try:
+                if count <= 0:
+                    elapsed = int(time.monotonic() - start)
+                    await tracker.set_stage(
+                        f"PDF変換中（大きいファイルは時間がかかります・経過 {elapsed}秒）",
+                        page=0,
+                        total=total,
+                    )
+                else:
+                    await tracker.set_stage(
+                        "サムネイル生成中",
+                        page=min(count, total) if total else count,
+                        total=total,
+                        throttle=True,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stop.wait(), timeout=_RENDER_POLL_SECONDS)
+
+    poller = asyncio.create_task(_poll())
+    try:
+        return await asyncio.to_thread(render_thumbnails, src_path, thumb_out)
+    finally:
+        stop.set()
+        poller.cancel()
+        with suppress(asyncio.CancelledError):
+            await poller
+
+
 async def _upsert_slide_meta(
     session,
     file_id: str,
@@ -400,7 +466,9 @@ async def _ingest_one(
         # therefore never wipes the file's existing thumbnails.
         thumb_out = THUMB_ROOT / f"{_safe_name(file_id)}.staging"
         shutil.rmtree(thumb_out, ignore_errors=True)
-        thumb_paths = await asyncio.to_thread(render_thumbnails, dl.path, thumb_out)
+        thumb_paths = await _render_thumbs_tracked(
+            dl.path, thumb_out, tracker, total=n_pages
+        )
         log.info(
             "ingest rendered thumbnails file_id=%s count=%d",
             file_id, len(thumb_paths),
@@ -974,7 +1042,9 @@ async def _regen_thumbnails_one(
         # a successful render+publish, so a failed regen keeps the old images.
         thumb_out = THUMB_ROOT / f"{_safe_name(file_id)}.staging"
         shutil.rmtree(thumb_out, ignore_errors=True)
-        thumb_paths = await asyncio.to_thread(render_thumbnails, dl.path, thumb_out)
+        thumb_paths = await _render_thumbs_tracked(
+            dl.path, thumb_out, tracker, total=None
+        )
         n_pages = len(thumb_paths)
         log.info(
             "thumbnail regen rendered file_id=%s count=%d", file_id, n_pages
