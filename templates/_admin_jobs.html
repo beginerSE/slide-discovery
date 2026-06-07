@@ -1,5 +1,5 @@
 {% import "_macros.html" as m %}
-{% set kind_map = {"manual": "全件取り込み", "retry": "再取り込み", "sync": "自動同期"} %}
+{% set kind_map = {"manual": "全件取り込み", "retry": "再取り込み", "sync": "自動同期", "thumbs": "サムネイル再生成"} %}
 {% set jstatus_map = {
   "running": ("実行中", "badge", "loader"),
   "done": ("完了", "badge-primary", "check"),
@@ -24,9 +24,18 @@
           <span class="font-medium text-sm">{{ kind_map.get(j.kind, j.kind) }}</span>
           {% if j.actorLabel %}<span class="text-xs text-muted">{{ j.actorLabel }}</span>{% endif %}
         </div>
-        <span class="text-xs text-muted">
-          {{ j.processed or 0 }} / {{ total }} 件完了{% if j.failed %}・失敗 {{ j.failed }} 件{% endif %}
-        </span>
+        <div class="row gap-2" style="align-items:center">
+          <span class="text-xs text-muted">
+            {{ j.processed or 0 }} / {{ total }} 件完了{% if j.failed %}・失敗 {{ j.failed }} 件{% endif %}
+          </span>
+          {% if running %}
+          <button class="btn btn-sm btn-outline" title="このジョブを中断する"
+            hx-post="/ui/admin/jobs/{{ j.id }}/cleanup" hx-target="#admin-run" hx-swap="innerHTML"
+            hx-confirm="この取り込みジョブを中断しますか？">
+            {{ m.icon("x") }}中断
+          </button>
+          {% endif %}
+        </div>
       </div>
       <div class="progress-track mt-1"><div class="progress-bar" style="width:{{ pct }}%"></div></div>
       {% if running and j.currentFile %}
