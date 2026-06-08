@@ -26,6 +26,7 @@ from auth import (
 )
 from csrf import csrf_context, verify_csrf
 from db import DriveFile, SessionLocal, Slide
+from series import extract_doc_date
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy import delete as sql_delete
@@ -191,6 +192,81 @@ async def ui_search(request: Request):
         ctx = await _search_context(session, q, facets, mode)
         ctx.update(request=request)
         return templates.TemplateResponse(request, "_search_response.html", ctx)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Conversational ("対話検索") search — NotebookLM-style Q&A
+# ─────────────────────────────────────────────────────────────────────
+
+
+async def _series_options(session) -> list[dict]:
+    """Distinct 定例シリーズ (Drive folders) that have ingested slides, for the
+    chat series picker. Ordered by display name."""
+    rows = (
+        await session.execute(
+            select(Slide.folder_id, Slide.folder_name)
+            .where(Slide.folder_id != "")
+            .distinct()
+        )
+    ).all()
+    options = [
+        {"id": fid, "name": fname or fid}
+        for fid, fname in rows
+        if fid
+    ]
+    options.sort(key=lambda o: o["name"])
+    return options
+
+
+@web_router.get("/chat", response_class=HTMLResponse)
+async def chat_page(request: Request):
+    async with SessionLocal() as session:
+        user = await _current_user_optional(request, session)
+        if user is None:
+            return _login_redirect(request)
+        series = await _series_options(session)
+        return templates.TemplateResponse(
+            request,
+            "chat.html",
+            {
+                "request": request,
+                "user": _user_dict(user),
+                "active_nav": "/chat",
+                "series_options": series,
+            },
+        )
+
+
+@web_router.post("/ui/chat", response_class=HTMLResponse)
+async def ui_chat(request: Request):
+    import main
+
+    async with SessionLocal() as session:
+        user = await _current_user_optional(request, session)
+        if user is None:
+            return HTMLResponse("", status_code=401)
+        form = await request.form()
+        question = (form.get("question") or "").strip()
+        if not question:
+            return HTMLResponse("", status_code=204)
+        series_id = (form.get("seriesId") or "").strip() or None
+        result = await main.ask_question(
+            main.AskBody(question=question, seriesId=series_id),
+            session=session,
+        )
+        return templates.TemplateResponse(
+            request,
+            "_chat_turn.html",
+            {
+                "request": request,
+                "question": question,
+                "answer": result["answer"],
+                "sources": result["sources"],
+                "degraded": result["degraded"],
+                "series_name": result.get("seriesName"),
+                "series_count": result.get("seriesCount") or 0,
+            },
+        )
 
 
 @web_router.get("/slides/{slide_id}", response_class=HTMLResponse)
@@ -474,10 +550,13 @@ async def ui_admin_add(request: Request):
         existing_ids = {r.drive_file_id for r in existing_rows}
         taken = {r.effective_name for r in existing_rows if r.effective_name}
 
+        from admin_routes import resolve_folder_names
+
+        folder_names = await resolve_folder_names({e[3] for e in entries})
         registered = 0
         skipped = 0
         conflicts: list[dict] = []
-        for file_id, url, name in entries:
+        for file_id, url, name, folder_id in entries:
             if file_id in existing_ids:
                 skipped += 1
                 continue
@@ -487,6 +566,7 @@ async def ui_admin_add(request: Request):
                         "fid": file_id,
                         "url": url,
                         "name": name,
+                        "folder_id": folder_id,
                         "suggested": next_available_name(name, taken),
                     }
                 )
@@ -497,6 +577,9 @@ async def ui_admin_add(request: Request):
                     share_url=url,
                     file_name=name,
                     status="pending",
+                    folder_id=folder_id,
+                    folder_name=folder_names.get(folder_id, ""),
+                    doc_date=extract_doc_date(name),
                 )
             )
             await log_addition(
@@ -539,6 +622,13 @@ async def ui_admin_add_resolve(request: Request):
         fids = form.getlist("cf_fid")
         urls = form.getlist("cf_url")
         names = form.getlist("cf_name")
+        folders = form.getlist("cf_folder")
+        if len(folders) < len(fids):
+            folders = folders + [""] * (len(fids) - len(folders))
+
+        from admin_routes import resolve_folder_names
+
+        folder_names = await resolve_folder_names(set(folders))
 
         existing_rows = (
             await session.execute(select(DriveFile))
@@ -548,7 +638,7 @@ async def ui_admin_add_resolve(request: Request):
         deleted_ids: set[str] = set()
 
         overwrote = renamed = skipped = 0
-        for file_id, url, name in zip(fids, urls, names):
+        for file_id, url, name, folder_id in zip(fids, urls, names, folders):
             if file_id in existing_ids:
                 # Already registered in the meantime — leave as-is.
                 continue
@@ -577,6 +667,9 @@ async def ui_admin_add_resolve(request: Request):
                         share_url=url,
                         file_name=name,
                         status="pending",
+                        folder_id=folder_id,
+                        folder_name=folder_names.get(folder_id, ""),
+                        doc_date=extract_doc_date(name),
                     )
                 )
                 await log_addition(
@@ -599,6 +692,9 @@ async def ui_admin_add_resolve(request: Request):
                         file_name=name,
                         display_name=new_name,
                         status="pending",
+                        folder_id=folder_id,
+                        folder_name=folder_names.get(folder_id, ""),
+                        doc_date=extract_doc_date(name),
                     )
                 )
                 await log_addition(
