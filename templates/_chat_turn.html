@@ -1,0 +1,60 @@
+{% import "_macros.html" as m %}
+<div class="chat-turn">
+  <div class="chat-bubble chat-user">
+    <div class="chat-avatar chat-avatar-user">{{ m.icon("user", "icon") }}</div>
+    <div class="chat-bubble-body">{{ question }}</div>
+  </div>
+
+  <div class="chat-bubble chat-ai">
+    <div class="chat-avatar chat-avatar-ai">{{ m.icon("sparkles", "icon") }}</div>
+    <div class="chat-bubble-body">
+      {% if degraded %}
+      <div class="alert alert-error">
+        AIによる回答の生成に失敗しました。下の参考スライドをご確認ください。
+        （GEMINI_API_KEY が未設定の可能性があります）
+      </div>
+      {% elif answer %}
+      <div class="chat-answer">{{ answer }}</div>
+      {% else %}
+      <div class="text-sm text-muted">回答を生成できませんでした。</div>
+      {% endif %}
+
+      {% if series_count %}
+      <div class="chat-series-used text-sm text-muted">
+        {{ m.icon("calendar") }}定例シリーズ「{{ series_name or "（フォルダ）" }}」の直近{{ series_count }}回分の流れを参照しました。
+      </div>
+      {% endif %}
+
+      {% if sources %}
+      <div class="chat-sources">
+        <div class="chat-sources-label">{{ m.icon("layers") }}参考スライド（{{ sources|length }}件）</div>
+        <div class="chat-source-grid">
+          {% for s in sources %}
+          <div class="chat-source-card">
+            <a href="/slides/{{ s.slideId }}" class="chat-source-main">
+              <div class="chat-source-thumb">
+                {% if s.thumbnailPath %}
+                <img src="{{ s.thumbnailPath }}" alt="{{ s.slideTitle }}" loading="lazy" />
+                {% else %}
+                <div class="chat-source-noimg">{{ m.icon("presentation") }}</div>
+                {% endif %}
+                <span class="chat-source-page">p.{{ s.pageNo }}</span>
+              </div>
+              <div class="chat-source-meta">
+                <div class="chat-source-file" title="{{ s.fileName }}">{{ m.icon("file-text") }}{{ s.fileName }}</div>
+                <div class="chat-source-ttl">{{ s.slideTitle or "無題のスライド" }}</div>
+              </div>
+            </a>
+            {% if s.sourceUrl %}
+            <a href="{{ s.sourceUrl }}" class="chat-source-open" target="_blank" rel="noopener noreferrer">
+              {{ m.icon("external-link") }}資料を開く（p.{{ s.pageNo }}）
+            </a>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
