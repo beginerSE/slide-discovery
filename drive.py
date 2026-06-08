@@ -396,6 +396,19 @@ async def fetch_file_name(file_id: str) -> str:
     return ""
 
 
+async def fetch_folder_name(folder_id: str) -> str:
+    """Best-effort display name for a Drive *folder* id.
+
+    Used at add time so a recurring-meeting series can be labelled with its
+    (client) folder name. In Drive API/ADC mode this is a cheap
+    ``files().get`` metadata call; in public share-link mode it returns "" —
+    the folder id alone still keys the series, the name is just a label.
+    """
+    if not folder_id or not config.use_drive_api():
+        return ""
+    return await _fetch_file_name_api(folder_id)
+
+
 # --- Drive Changes API (incremental sync, Drive API / ADC mode only) --------
 
 
