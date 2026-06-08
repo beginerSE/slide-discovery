@@ -13,7 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import require_admin
 from db import AddLog, DriveFile, DriveFolder, Slide, User, get_session, utcnow
-from drive import fetch_file_name, list_folder_files, parse_share_input, view_url
+from drive import (
+    fetch_file_name,
+    fetch_folder_name,
+    list_folder_files,
+    parse_share_input,
+    view_url,
+)
+from series import extract_doc_date
 from ingest import (
     cleanup_job,
     list_jobs,
@@ -61,14 +68,16 @@ def next_available_name(name: str, taken: set[str]) -> str:
 
 async def resolve_input_entries(
     text: str, session: AsyncSession
-) -> tuple[list[tuple[str, str, str]], list[str]]:
+) -> tuple[list[tuple[str, str, str, str]], list[str]]:
     """Parse pasted links + expand any folder URLs into individual files.
 
     Returns ``(entries, folder_errors)`` where each entry is
-    ``(drive_file_id, share_url, file_name)``. ``file_name`` is "" when the
-    name is not yet known (direct file links). Registers folders so the
-    incremental change poller can watch them, but does NOT register or commit
-    DriveFile rows — callers decide how to handle collisions first.
+    ``(drive_file_id, share_url, file_name, folder_id)``. ``file_name`` is ""
+    when the name is not yet known (direct file links); ``folder_id`` is the
+    Drive folder the file was listed under (its recurring-meeting series key),
+    or "" for direct file links. Registers folders so the incremental change
+    poller can watch them, but does NOT register or commit DriveFile rows —
+    callers decide how to handle collisions first.
     """
     file_entries, folder_ids = parse_share_input(text)
     if not file_entries and not folder_ids:
@@ -83,6 +92,7 @@ async def resolve_input_entries(
     folder_errors: list[str] = []
     seen_file_ids: set[str] = {fid for fid, _ in file_entries}
     known_names: dict[str, str] = {}
+    file_folder: dict[str, str] = {}
     for folder_id in folder_ids:
         existing_folder = (
             await session.execute(
@@ -109,12 +119,13 @@ async def resolve_input_entries(
             continue
         for fid, fname in items:
             known_names[fid] = fname
+            file_folder.setdefault(fid, folder_id)
             if fid in seen_file_ids:
                 continue
             seen_file_ids.add(fid)
             file_entries.append((fid, view_url(fid)))
 
-    entries: list[tuple[str, str, str]] = []
+    entries: list[tuple[str, str, str, str]] = []
     for file_id, original in file_entries:
         url = original if original.startswith("http") else view_url(file_id)
         name = known_names.get(file_id, "")
@@ -123,8 +134,16 @@ async def resolve_input_entries(
             # collision detection can still run. Cheap metadata call in Drive
             # API mode; "" in public mode (name only known after download).
             name = await fetch_file_name(file_id)
-        entries.append((file_id, url, name))
+        entries.append((file_id, url, name, file_folder.get(file_id, "")))
     return entries, folder_errors
+
+
+async def resolve_folder_names(folder_ids) -> dict[str, str]:
+    """Best-effort ``folder_id -> folder_name`` map (one lookup per id)."""
+    names: dict[str, str] = {}
+    for fid in {f for f in folder_ids if f}:
+        names[fid] = await fetch_folder_name(fid)
+    return names
 
 
 class AddLinksBody(BaseModel):
@@ -163,9 +182,10 @@ async def add_drive_files(
             msg += " / " + " ; ".join(folder_errors)
         raise HTTPException(status_code=400, detail=msg)
 
+    folder_names = await resolve_folder_names({e[3] for e in entries})
     added: list[DriveFile] = []
     skipped = 0
-    for file_id, url, name in entries:
+    for file_id, url, name, folder_id in entries:
         existing = (
             await session.execute(
                 select(DriveFile).where(DriveFile.drive_file_id == file_id)
@@ -179,6 +199,9 @@ async def add_drive_files(
             share_url=url,
             file_name=name,
             status="pending",
+            folder_id=folder_id,
+            folder_name=folder_names.get(folder_id, ""),
+            doc_date=extract_doc_date(name),
         )
         session.add(row)
         added.append(row)
