@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import AsyncGenerator
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Integer,
     String,
@@ -151,6 +152,14 @@ class Slide(Base):
     thumbnail_path: Mapped[str] = mapped_column(String, nullable=False, default="")
     source_url: Mapped[str] = mapped_column(String, nullable=False, default="")
     access_level: Mapped[str] = mapped_column(String, nullable=False, default="internal")
+    # Recurring-meeting ("定例") series: the Drive folder the source file lives
+    # directly under (by convention a client-name folder), plus a date parsed
+    # from the file/slide name for chronological catch-up. See ``series.py``.
+    folder_id: Mapped[str] = mapped_column(
+        String, nullable=False, default="", index=True
+    )
+    folder_name: Mapped[str] = mapped_column(String, nullable=False, default="")
+    doc_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(EMBED_DIM), nullable=True
     )
@@ -185,6 +194,9 @@ class Slide(Base):
             "thumbnailPath": self.thumbnail_path,
             "sourceUrl": self.source_url,
             "accessLevel": self.access_level,
+            "folderId": self.folder_id,
+            "folderName": self.folder_name,
+            "docDate": self.doc_date.isoformat() if self.doc_date else None,
             "createdAt": self.created_at.astimezone(timezone.utc)
             .isoformat()
             .replace("+00:00", "Z"),
@@ -245,6 +257,13 @@ class DriveFile(Base):
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     slide_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Recurring-meeting ("定例") series: the Drive folder this file lives directly
+    # under (client folder), plus a date parsed from the file name. See series.py.
+    folder_id: Mapped[str] = mapped_column(
+        String, nullable=False, default="", index=True
+    )
+    folder_name: Mapped[str] = mapped_column(String, nullable=False, default="")
+    doc_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
@@ -272,6 +291,9 @@ class DriveFile(Base):
             else None,
             "lastError": self.last_error,
             "slideCount": self.slide_count,
+            "folderId": self.folder_id,
+            "folderName": self.folder_name,
+            "docDate": self.doc_date.isoformat() if self.doc_date else None,
             "addedAt": self.added_at.astimezone(timezone.utc)
             .isoformat()
             .replace("+00:00", "Z"),
@@ -375,6 +397,11 @@ class IngestJob(Base):
     current_file_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
     current_file_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Newline-joined display names of the files this run actually ingested,
+    # accumulated as each file finishes. Persisted so the admin can see which
+    # files a job processed even after it completes (when current_file is
+    # cleared).
+    ingested_files: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
@@ -409,6 +436,9 @@ class IngestJob(Base):
             "currentFilePage": self.current_file_page,
             "currentFileTotal": self.current_file_total,
             "message": self.message,
+            "ingestedFiles": [
+                line for line in (self.ingested_files or "").splitlines() if line
+            ],
             "startedAt": iso(self.started_at),
             "updatedAt": iso(self.updated_at),
             "finishedAt": iso(self.finished_at),
@@ -477,6 +507,37 @@ async def init_db() -> None:
                 "varchar NOT NULL DEFAULT ''"
             )
         )
+        # Recurring-meeting ("定例") series columns (folder grouping + date).
+        for tbl in ("slides", "drive_files"):
+            await conn.execute(
+                text(
+                    f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS folder_id "
+                    "varchar NOT NULL DEFAULT ''"
+                )
+            )
+            await conn.execute(
+                text(
+                    f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS folder_name "
+                    "varchar NOT NULL DEFAULT ''"
+                )
+            )
+            await conn.execute(
+                text(
+                    f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS doc_date date"
+                )
+            )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS slides_folder_id_idx "
+                "ON slides (folder_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS slides_doc_date_idx "
+                "ON slides (doc_date)"
+            )
+        )
         await conn.execute(
             text(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS can_upload "
@@ -494,6 +555,12 @@ async def init_db() -> None:
             text(
                 "ALTER TABLE ingest_jobs ADD COLUMN IF NOT EXISTS updated_at "
                 "timestamptz NOT NULL DEFAULT now()"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE ingest_jobs ADD COLUMN IF NOT EXISTS "
+                "ingested_files text"
             )
         )
         await conn.execute(
