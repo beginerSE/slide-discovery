@@ -4,9 +4,14 @@
   <div class="text-sm font-semibold">スライド一覧（{{ "{:,}".format(total) }} 件）</div>
   <div class="search-box">
     {{ m.icon("search", "search-icon") }}
-    <input class="input" type="text" name="q" value="{{ q or '' }}" placeholder="タイトル / ファイル名 / 概要 / 業界 / 提案種別 で検索" autocomplete="off"
+    <input class="input" type="text" name="q" value="{{ q or '' }}" placeholder="タイトル / ファイル名 / 概要 / 業界 / 提案種別 を入力してEnterまたは検索ボタン" autocomplete="off"
       hx-get="/ui/admin/slides-list" hx-target="#slide-list" hx-swap="innerHTML"
-      hx-trigger="keyup changed delay:300ms, search" hx-vals='{"page": 0}' />
+      hx-trigger="keyup[key=='Enter']" hx-vals='{"page": 0}' />
+    <button type="button" class="btn search-btn"
+      hx-get="/ui/admin/slides-list" hx-target="#slide-list" hx-swap="innerHTML"
+      hx-include="[name='q']" hx-vals='{"page": 0}'>
+      {{ m.icon("search") }}<span>検索</span>
+    </button>
   </div>
 
   {% if items|length == 0 %}
