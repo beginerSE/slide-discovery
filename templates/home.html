@@ -6,11 +6,16 @@
     <div class="search-box">
       {{ m.icon("search", "search-icon") }}
       <input class="input" type="text" name="q" value="{{ q or '' }}"
-        placeholder="複数キーワード（AND）、OR、-除外 で検索..."
+        placeholder="複数キーワード（AND）、OR、-除外 を入力してEnterまたは検索ボタン"
         autocomplete="off"
         hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
-        hx-trigger="keyup changed delay:300ms, search"
+        hx-trigger="keyup[key=='Enter']"
         hx-include="#facet-state, [name='mode']" />
+      <button type="button" class="btn search-btn"
+        hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
+        hx-include="[name='q'], #facet-state, [name='mode']">
+        {{ m.icon("search") }}<span>検索</span>
+      </button>
     </div>
 
     <div class="mode-toggle" role="group" aria-label="検索モード">
