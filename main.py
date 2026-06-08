@@ -13,6 +13,7 @@ from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.sessions import SessionMiddleware
@@ -23,6 +24,7 @@ from auth import router as auth_router
 from db import (
     FTS_EXPR,
     SEARCH_EXPR,
+    DriveFile,
     Slide,
     SessionLocal,
     get_session,
@@ -391,6 +393,95 @@ async def search_slides(
         s["matchReason"] = match_reason
         items.append(s)
     return {"total": int(total), "items": items}
+
+
+class AskBody(BaseModel):
+    question: str
+    topK: int = 8
+    seriesId: Optional[str] = None
+
+
+@app.post("/api/ask")
+async def ask_question(
+    body: AskBody, session: AsyncSession = Depends(get_session)
+):
+    """Conversational ("対話検索") answer. Retrieves the most relevant slides
+    via semantic search, then asks Gemini to answer grounded ONLY in those
+    slides, citing source file + page (NotebookLM-style). Degrades
+    gracefully: if answer generation fails (e.g. no GEMINI_API_KEY) we still
+    return the retrieved source slides with answer=None."""
+    question = (body.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question required")
+
+    top_k = max(1, min(int(body.topK or 8), 20))
+    res = await search_slides(
+        q=question, mode="semantic", limit=top_k, offset=0, session=session
+    )
+    sources = res["items"]
+    if not sources:
+        return {
+            "question": question,
+            "answer": "該当する資料は見つかりませんでした。",
+            "sources": [],
+            "degraded": False,
+        }
+
+    from gemini_chat import generate_answer
+    from series import recent_series_context
+
+    # Detect the 定例シリーズ (recurring-meeting series = Drive folder): use an
+    # explicit seriesId if given, else infer it from the top hit's folder.
+    series_id = (body.seriesId or "").strip()
+    if not series_id:
+        series_id = (sources[0].get("folderId") or "").strip()
+    series_context: list[dict] = []
+    series_name = ""
+    if series_id:
+        try:
+            series_context = await recent_series_context(session, series_id)
+            # Prefer a name already in the retrieved sources; otherwise (e.g.
+            # an explicit seriesId whose folder is absent from the top hits)
+            # look it up so the UI label is correct.
+            series_name = next(
+                (
+                    s.get("folderName")
+                    for s in sources
+                    if s.get("folderId") == series_id and s.get("folderName")
+                ),
+                "",
+            )
+            if not series_name:
+                row = (
+                    await session.execute(
+                        select(DriveFile.folder_name)
+                        .where(DriveFile.folder_id == series_id)
+                        .where(DriveFile.folder_name != "")
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                series_name = row or ""
+        except Exception as e:
+            log.warning("ask: series context failed: %s", e)
+
+    answer: Optional[str] = None
+    degraded = False
+    try:
+        answer = await generate_answer(
+            question, sources, series=series_context or None
+        )
+    except Exception as e:
+        log.warning("ask: answer generation failed: %s", e)
+        degraded = True
+    return {
+        "question": question,
+        "answer": answer,
+        "sources": sources,
+        "degraded": degraded,
+        "seriesId": series_id,
+        "seriesName": series_name,
+        "seriesCount": len(series_context),
+    }
 
 
 @app.get("/api/slides/{slide_id}")
