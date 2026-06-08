@@ -17,6 +17,7 @@ from drive import DownloadResult, download, view_url
 from gemini_embed import build_slide_embed_text, embed_text
 from gemini_extract import extract_metadata
 from pptx_pipeline import SlideExtract, extract_slides, render_thumbnails
+from series import extract_doc_date
 
 import thumbnail_store
 from thumbnail_store import THUMB_ROOT
@@ -76,6 +77,7 @@ class JobTracker:
         self.job_id = job_id
         self.processed = 0
         self.failed = 0
+        self.files: list[str] = []
         self._last_page_flush = 0.0
 
     def _abort_if_not_running(self, job: IngestJob | None) -> None:
@@ -131,10 +133,15 @@ class JobTracker:
             stage=stage, current_file_page=page, current_file_total=total
         )
 
-    async def file_done(self) -> None:
+    async def file_done(self, name: str | None = None) -> None:
         self.processed += 1
+        if name:
+            # Names are stored newline-joined, so flatten any newlines in a
+            # (pathological) Drive filename to keep the list one-entry-per-line.
+            self.files.append(name.replace("\r", " ").replace("\n", " "))
         await self._patch(
             processed=self.processed,
+            ingested_files="\n".join(self.files),
             current_file=None,
             stage=None,
             current_file_page=None,
@@ -322,6 +329,9 @@ async def _upsert_slide_meta(
     meta: dict,
     eff_name: str,
     fingerprint: str,
+    folder_id: str = "",
+    folder_name: str = "",
+    file_doc_date=None,
 ) -> None:
     """Persist one page's metadata immediately (its own transaction).
 
@@ -355,6 +365,9 @@ async def _upsert_slide_meta(
         source_url=f"{view_url(file_id)}#slide={ex.page_no}",
         access_level="internal",
         source_fingerprint=fingerprint,
+        folder_id=folder_id,
+        folder_name=folder_name,
+        doc_date=extract_doc_date(ex.title) or file_doc_date,
     )
     row = await session.get(Slide, slide_id)
     if row is None:
@@ -368,6 +381,35 @@ async def _upsert_slide_meta(
         # recomputes it.
         row.embedding = None
     await session.commit()
+
+
+async def _backfill_slide_series_fields(
+    session,
+    file_id: str,
+    folder_id: str,
+    folder_name: str,
+    file_doc_date,
+) -> None:
+    """Refresh file-level series fields on every slide of a file.
+
+    ``_upsert_slide_meta`` only runs for *recomputed* pages, so reused/skipped
+    pages (and legacy rows) would otherwise keep stale or empty
+    ``folder_id``/``folder_name``/``doc_date`` — which ``recent_series_context``
+    relies on. This makes the slide-level series fields authoritative regardless
+    of how a page was (re)ingested. Per-slide ``doc_date`` keeps a
+    title-derived date when present, else falls back to the file-level date.
+    """
+    rows = (
+        await session.execute(
+            select(Slide).where(Slide.file_id == file_id)
+        )
+    ).scalars().all()
+    for row in rows:
+        row.folder_id = folder_id
+        row.folder_name = folder_name
+        row.doc_date = extract_doc_date(row.slide_title) or file_doc_date
+    if rows:
+        await session.commit()
 
 
 async def _ingest_one(
@@ -412,6 +454,10 @@ async def _ingest_one(
         await tracker.set_current_file(dl.file_name or file_id)
         eff_name = drive_file.display_name or dl.file_name
         fingerprint = _file_fingerprint(dl.etag, dl.size)
+        # File-level meeting date: prefer the date captured at add-time, else
+        # parse the now-known downloaded filename (public-mode direct links
+        # have no name pre-ingest, so this is the first chance to date them).
+        file_doc_date = drive_file.doc_date or extract_doc_date(dl.file_name)
         log.info(
             "ingest downloaded file_id=%s name=%r size=%s etag=%s",
             file_id, dl.file_name, dl.size, dl.etag,
@@ -446,7 +492,22 @@ async def _ingest_one(
                     if db_row:
                         db_row.status = "ready"
                         db_row.file_name = dl.file_name
+                        if db_row.doc_date is None and file_doc_date is not None:
+                            db_row.doc_date = file_doc_date
                         await session.commit()
+                    # Even an unchanged file must keep its slides' series fields
+                    # current (folder may have been renamed, or rows predate the
+                    # series feature) so timeline context isn't silently missing.
+                    # Prefer the freshly-loaded row (drive_sync may have updated
+                    # folder/date since this run was scheduled).
+                    src = db_row or drive_file
+                    await _backfill_slide_series_fields(
+                        session,
+                        file_id,
+                        src.folder_id or "",
+                        src.folder_name or "",
+                        src.doc_date or file_doc_date,
+                    )
                 log.info("skip unchanged %s", file_id)
                 await tracker.set_stage(None)
                 return (0, 0)
@@ -537,7 +598,10 @@ async def _ingest_one(
                     result = dict(_FALLBACK_META, summary=ex.body_text[:100])
             async with session_factory() as session:
                 await _upsert_slide_meta(
-                    session, file_id, ex, result, eff_name, fingerprint
+                    session, file_id, ex, result, eff_name, fingerprint,
+                    folder_id=drive_file.folder_id or "",
+                    folder_name=drive_file.folder_name or "",
+                    file_doc_date=file_doc_date,
                 )
             meta_done += 1
             await tracker.set_stage(
@@ -678,6 +742,10 @@ async def _ingest_one(
                 # Keep the raw Drive name; display_name (if any) is preserved.
                 db_row.file_name = dl.file_name
                 db_row.slide_count = slide_count
+                # Backfill the file-level meeting date once known (public-mode
+                # direct links have no name at add-time).
+                if db_row.doc_date is None and file_doc_date is not None:
+                    db_row.doc_date = file_doc_date
                 if complete:
                     db_row.status = "ready"
                     db_row.last_size = dl.size
@@ -692,6 +760,17 @@ async def _ingest_one(
                         f"埋め込み未完了: {missing_embeddings}ページ"
                     )[:500]
             await session.commit()
+            # Ensure every slide (including reused pages skipped by
+            # _upsert_slide_meta) carries the file's series fields. Prefer the
+            # freshly-loaded row over the (possibly stale) scheduled arg.
+            src = db_row or drive_file
+            await _backfill_slide_series_fields(
+                session,
+                file_id,
+                src.folder_id or "",
+                src.folder_name or "",
+                src.doc_date or file_doc_date,
+            )
         log.info(
             "ingested %s -> %d slides (recomputed=%d reused=%d missing_embed=%d)",
             file_id, slide_count, len(recompute), reused, missing_embeddings,
@@ -803,7 +882,9 @@ async def run_ingest(
                 continue
             try:
                 await _ingest_one(SessionLocal, row, force=force, tracker=tracker)
-                await tracker.file_done()
+                await tracker.file_done(
+                    row.display_name or row.file_name or row.drive_file_id
+                )
             except asyncio.CancelledError:
                 # Cleaned up / reaped mid-file: stop owning the file and let
                 # cancellation propagate (the job row is already terminal).
@@ -1126,7 +1207,9 @@ async def run_thumbnail_regen(
             return {"jobId": job_id}
         try:
             await _regen_thumbnails_one(SessionLocal, row, tracker=tracker)
-            await tracker.file_done()
+            await tracker.file_done(
+                row.display_name or row.file_name or row.drive_file_id
+            )
             await tracker.finish("done")
         except asyncio.CancelledError:
             raise
