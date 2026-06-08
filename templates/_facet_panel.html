@@ -6,11 +6,11 @@
 {%- else -%}{%- set _ = ns.d.update({field: value}) -%}{%- endif -%}
 {{- ns.d | tojson -}}
 {%- endmacro -%}
-{%- macro facet_group(m, facets, field, options, ico, label) -%}
+{%- macro facet_group(m, facets, field, options, ico, label, scroll=false) -%}
 {%- if options -%}
 <div>
-  <div class="facet-group-label">{{ m.icon(ico) }}<span>{{ label }}</span></div>
-  <div class="chips">
+  <div class="facet-group-label">{{ m.icon(ico) }}<span>{{ label }}</span><span class="facet-count">{{ options | length }}</span></div>
+  <div class="chips{% if scroll %} chips-scroll{% endif %}">
     {% for opt in options %}
     <button type="button" class="chip {% if facets.get(field) == opt.value %}active{% endif %}"
       hx-get="/ui/search" hx-vals='{{ toggled(facets, field, opt.value) }}'
@@ -41,5 +41,5 @@
   {{ facet_group(m, facets, "client", filters.clients, "building", "クライアント先") }}
   {{ facet_group(m, facets, "proposalType", filters.proposalTypes, "layout", "提案種別") }}
   {{ facet_group(m, facets, "graphType", filters.graphTypes, "bar-chart", "グラフ") }}
-  {{ facet_group(m, facets, "tag", filters.tags, "layers", "タグ") }}
+  {{ facet_group(m, facets, "tag", filters.tags, "layers", "タグ", scroll=true) }}
 </div>
