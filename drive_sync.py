@@ -23,6 +23,7 @@ import drive
 from db import AddLog, AppState, DriveFile, DriveFolder, Slide, SessionLocal, utcnow
 from drive import view_url
 from ingest import schedule_ingest_background
+from series import extract_doc_date
 
 log = logging.getLogger("ingest.drive_sync")
 
@@ -92,6 +93,7 @@ async def sync_drive_changes() -> dict:
         }
 
         new_rows: dict[str, DriveFile] = {}
+        folder_name_cache: dict[str, str] = {}
         for ch in changes:
             existing = tracked.get(ch.file_id)
             if ch.removed or ch.trashed:
@@ -107,10 +109,26 @@ async def sync_drive_changes() -> dict:
                     removed += 1
                 continue
             if existing:
-                # Modified tracked file → re-ingest just this one. A None id
-                # means it's a brand-new row added earlier in this same drain
-                # (recurring file_id); it's already collected via new_rows, so
-                # skip to avoid a None creeping into the id list.
+                # Modified tracked file → refresh its series fields from the
+                # change payload (the file may have moved folders or been
+                # renamed) so the re-ingest backfills slides with current
+                # values, then re-ingest just this one. A None id means it's a
+                # brand-new row added earlier in this same drain (recurring
+                # file_id); it's already collected via new_rows, so skip to
+                # avoid a None creeping into the id list.
+                new_folder_id = next(
+                    (p for p in ch.parents if p in folders), existing.folder_id
+                )
+                if new_folder_id and new_folder_id != existing.folder_id:
+                    existing.folder_id = new_folder_id
+                    if new_folder_id not in folder_name_cache:
+                        folder_name_cache[new_folder_id] = (
+                            await drive.fetch_folder_name(new_folder_id)
+                        )
+                    existing.folder_name = folder_name_cache[new_folder_id]
+                # A rename may newly expose (or change) a date; never wipe an
+                # existing date just because the new name has none.
+                existing.doc_date = extract_doc_date(ch.name) or existing.doc_date
                 if existing.id is not None:
                     reingest_ids.append(existing.id)
                 continue
@@ -121,11 +139,22 @@ async def sync_drive_changes() -> dict:
                 and drive.is_pptx(ch.name, ch.mime)
                 and any(p in folders for p in ch.parents)
             ):
+                folder_id = next((p for p in ch.parents if p in folders), "")
+                folder_name = ""
+                if folder_id:
+                    if folder_id not in folder_name_cache:
+                        folder_name_cache[folder_id] = await drive.fetch_folder_name(
+                            folder_id
+                        )
+                    folder_name = folder_name_cache[folder_id]
                 row = DriveFile(
                     drive_file_id=ch.file_id,
                     share_url=view_url(ch.file_id),
                     file_name=ch.name,
                     status="pending",
+                    folder_id=folder_id,
+                    folder_name=folder_name,
+                    doc_date=extract_doc_date(ch.name),
                 )
                 session.add(row)
                 # Record auto-registration in the addition-history log so
