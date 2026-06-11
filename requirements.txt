@@ -12,6 +12,7 @@ itsdangerous
 pillow
 python-pptx
 psycopg2-binary
+markdown
 # Google / GCP-native production backends (ADC):
 #   Cloud SQL connection, Vertex AI (Gemini), Drive API ingest.
 google-genai
