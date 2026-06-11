@@ -371,6 +371,31 @@ class AddLog(Base):
         }
 
 
+def _parse_ingested_files(raw: str | None) -> list[dict]:
+    """Parse the stored per-file ingest records for the admin job history.
+
+    Each line is ``name\\tslide_count\\tISO8601`` (written by
+    ``ingest.JobTracker.file_done``). ``slide_count``/timestamp may be empty,
+    and legacy rows (written before this format) are a bare ``name`` with no
+    tabs — both must still yield a usable ``name`` so the template never breaks.
+    """
+    out: list[dict] = []
+    for line in (raw or "").splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        name = parts[0]
+        slide_count: int | None = None
+        if len(parts) > 1 and parts[1].strip():
+            try:
+                slide_count = int(parts[1])
+            except ValueError:
+                slide_count = None
+        at = parts[2] if len(parts) > 2 and parts[2].strip() else None
+        out.append({"name": name, "slideCount": slide_count, "at": at})
+    return out
+
+
 class IngestJob(Base):
     """A single ingest run, persisted so progress survives across processes.
 
@@ -436,9 +461,7 @@ class IngestJob(Base):
             "currentFilePage": self.current_file_page,
             "currentFileTotal": self.current_file_total,
             "message": self.message,
-            "ingestedFiles": [
-                line for line in (self.ingested_files or "").splitlines() if line
-            ],
+            "ingestedFiles": _parse_ingested_files(self.ingested_files),
             "startedAt": iso(self.started_at),
             "updatedAt": iso(self.updated_at),
             "finishedAt": iso(self.finished_at),
