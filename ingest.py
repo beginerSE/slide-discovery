@@ -133,12 +133,22 @@ class JobTracker:
             stage=stage, current_file_page=page, current_file_total=total
         )
 
-    async def file_done(self, name: str | None = None) -> None:
+    async def file_done(
+        self, name: str | None = None, slide_count: int | None = None
+    ) -> None:
         self.processed += 1
         if name:
-            # Names are stored newline-joined, so flatten any newlines in a
-            # (pathological) Drive filename to keep the list one-entry-per-line.
-            self.files.append(name.replace("\r", " ").replace("\n", " "))
+            # Each processed file is stored as one tab-separated line
+            # ``name\tslide_count\tISO8601`` so the admin job history can show
+            # which file was ingested, how many slides it produced, and when.
+            # Flatten tabs/newlines in a (pathological) Drive filename so the
+            # one-entry-per-line / tab-delimited parsing stays intact.
+            clean = (
+                name.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+            )
+            count = "" if slide_count is None else str(int(slide_count))
+            at = utcnow().isoformat().replace("+00:00", "Z")
+            self.files.append(f"{clean}\t{count}\t{at}")
         await self._patch(
             processed=self.processed,
             ingested_files="\n".join(self.files),
@@ -417,8 +427,8 @@ async def _ingest_one(
     drive_file: DriveFile,
     force: bool,
     tracker: JobTracker,
-) -> tuple[int, int]:
-    """Ingest a single DriveFile row. Returns (pages_recomputed, pages_reused).
+) -> int:
+    """Ingest a single DriveFile row. Returns the file's slide_count.
 
     Resumable: each page's metadata is persisted as soon as it's extracted and
     each embedding as soon as it's computed, both keyed by a content
@@ -439,7 +449,7 @@ async def _ingest_one(
         db_row = await session.get(DriveFile, drive_file.id)
         if db_row is None:
             log.warning("ingest abort file_id=%s: drive_file row missing", file_id)
-            return (0, 0)
+            return 0
         db_row.status = "processing"
         db_row.last_error = None
         # An admin-chosen display name (set on a name collision) overrides
@@ -510,7 +520,7 @@ async def _ingest_one(
                     )
                 log.info("skip unchanged %s", file_id)
                 await tracker.set_stage(None)
-                return (0, 0)
+                return db_row.slide_count or 0
 
         # Parse and render in worker thread (CPU/IO heavy)
         await tracker.set_stage("スライド解析中")
@@ -780,7 +790,7 @@ async def _ingest_one(
             raise IncompleteIngest(
                 f"{file_id}: {missing_embeddings} ページの埋め込みが未完了です"
             )
-        return (len(recompute), reused)
+        return slide_count
     except IncompleteIngest:
         # Status was already set to resumable ``pending`` above; do not let the
         # generic handler overwrite it to ``failed``. Re-raise so the run loop
@@ -881,9 +891,12 @@ async def run_ingest(
                 await tracker.drop_one()
                 continue
             try:
-                await _ingest_one(SessionLocal, row, force=force, tracker=tracker)
+                slide_count = await _ingest_one(
+                    SessionLocal, row, force=force, tracker=tracker
+                )
                 await tracker.file_done(
-                    row.display_name or row.file_name or row.drive_file_id
+                    row.display_name or row.file_name or row.drive_file_id,
+                    slide_count,
                 )
             except asyncio.CancelledError:
                 # Cleaned up / reaped mid-file: stop owning the file and let
