@@ -22,6 +22,7 @@
       {{ m.source_badge(slide) }}
       {% if slide.industry %}<span class="badge">{{ slide.industry }}</span>{% endif %}
       {% if slide.proposalType %}<span class="badge badge-outline">{{ slide.proposalType }}</span>{% endif %}
+      {% if slide.docCategory %}<span class="badge badge-outline">{{ slide.docCategory }}</span>{% endif %}
       {% for t in (slide.tags or [])[:2] %}<span class="tag-mini">#{{ t }}</span>{% endfor %}
       {% if (slide.tags or [])|length > 2 %}<span class="tag-mini" style="background:none">+{{ (slide.tags|length) - 2 }}</span>{% endif %}
     </div>
