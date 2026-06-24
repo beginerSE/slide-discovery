@@ -816,6 +816,63 @@ label.field-label {
 .htmx-request .htmx-indicator { opacity: 1; }
 .htmx-request.htmx-indicator { opacity: 1; }
 
+/* Inline spinner + progress row shown while an add/ingest request is in flight */
+.spinner {
+  display: inline-block; width: 1rem; height: 1rem; flex-shrink: 0;
+  border: 2px solid hsl(var(--border));
+  border-top-color: hsl(var(--primary));
+  border-radius: 50%; animation: spin 0.7s linear infinite;
+}
+.add-progress { display: none; align-items: center; }
+.htmx-request .add-progress, .htmx-request.add-progress { display: flex; }
+
+/* Folder-structure tree view (admin "フォルダ構成の確認") */
+.tree-summary { margin-bottom: 0.25rem; }
+.tree-root { font-size: 0.875rem; }
+.tree-folder-name {
+  align-items: center; font-weight: 600;
+  padding: 0.3rem 0; color: hsl(var(--foreground));
+}
+.tree-folder-name .ficon { color: hsl(var(--muted-foreground)); }
+.tree-children {
+  margin-left: 0.7rem; padding-left: 0.85rem;
+  border-left: 1px solid hsl(var(--border));
+}
+.tree-file {
+  align-items: center; padding: 0.25rem 0;
+}
+.tree-file .ficon { color: hsl(var(--muted-foreground)); flex-shrink: 0; }
+.tree-file-name {
+  color: hsl(var(--foreground)); text-decoration: none;
+  max-width: 28rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tree-file-name:hover { text-decoration: underline; }
+
+/* Toast popups (bottom-right), used for the share-link add summary */
+.toast-container {
+  position: fixed; bottom: 1.25rem; right: 1.25rem; z-index: 1000;
+  display: flex; flex-direction: column; gap: 0.6rem;
+  max-width: min(92vw, 24rem); pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: flex; align-items: flex-start; gap: 0.6rem;
+  padding: 0.75rem 0.9rem; border-radius: var(--radius, 0.6rem);
+  background: hsl(var(--card)); color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border)); border-left-width: 4px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.18); font-size: 0.85rem;
+  opacity: 0; transform: translateY(0.5rem);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.toast-success { border-left-color: hsl(var(--primary)); }
+.toast.toast-error { border-left-color: hsl(var(--destructive)); }
+.toast .toast-msg { flex: 1; line-height: 1.4; }
+.toast .toast-close {
+  background: none; border: none; cursor: pointer; padding: 0;
+  color: hsl(var(--muted-foreground)); line-height: 1; font-size: 1rem;
+}
+
 .truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .flex-1 { flex: 1; min-width: 0; }
 .shrink-0 { flex-shrink: 0; }
@@ -880,8 +937,16 @@ label.field-label {
 .chat-source-ttl:hover { text-decoration: underline; }
 
 .chat-composer { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.75rem 0; background: linear-gradient(to top, hsl(var(--background)) 75%, transparent); }
-.chat-series { flex: 1 1 100%; align-items: center; }
+.chat-series-field { flex: 1 1 100%; }
+.chat-series { align-items: center; }
 .chat-series select { flex: 1; min-width: 0; }
+.chat-series-hint {
+  display: flex; align-items: flex-start; gap: 0.4rem;
+  margin: 0.4rem 0 0; font-size: 0.72rem; line-height: 1.5;
+  color: hsl(var(--muted-foreground));
+}
+.chat-series-hint .icon { flex-shrink: 0; margin-top: 0.15rem; }
+.chat-series-hint strong { color: hsl(var(--foreground)); font-weight: 600; }
 .chat-series-used { display: inline-flex; align-items: center; gap: 0.35rem; margin-top: 0.5rem; }
 .chat-input { flex: 1; min-width: 12rem; }
 .chat-send { flex: none; display: inline-flex; align-items: center; gap: 0.35rem; }

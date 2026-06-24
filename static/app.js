@@ -164,3 +164,49 @@ document.body && document.body.addEventListener("htmx:afterSwap", (e) => {
   });
   document.body.addEventListener("htmx:sendError", () => dropPending(true));
 })();
+
+// Toast popups. The server raises these via an HX-Trigger response header
+// (`{"showToast": {"message": "...", "type": "success"|"error"}}`), e.g. the
+// share-link add summary "新規 N 件追加、既存 N 件".
+(function initToasts() {
+  if (!document.body) return;
+
+  function showToast(message, type) {
+    if (!message) return;
+    const wrap = document.getElementById("toast-container");
+    if (!wrap) return;
+    const el = document.createElement("div");
+    el.className = "toast toast-" + (type === "error" ? "error" : "success");
+    el.setAttribute("role", type === "error" ? "alert" : "status");
+
+    const msg = document.createElement("div");
+    msg.className = "toast-msg";
+    msg.textContent = message;
+
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "toast-close";
+    close.setAttribute("aria-label", "閉じる");
+    close.textContent = "×";
+
+    let removed = false;
+    const remove = () => {
+      if (removed) return;
+      removed = true;
+      el.classList.remove("show");
+      setTimeout(() => el.remove(), 250);
+    };
+    close.addEventListener("click", remove);
+
+    el.appendChild(msg);
+    el.appendChild(close);
+    wrap.appendChild(el);
+    requestAnimationFrame(() => el.classList.add("show"));
+    setTimeout(remove, 6000);
+  }
+
+  document.body.addEventListener("showToast", (e) => {
+    const d = e.detail || {};
+    showToast(d.message || d.value || "", d.type);
+  });
+})();
