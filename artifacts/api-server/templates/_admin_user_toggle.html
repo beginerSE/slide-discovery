@@ -1,5 +1,0 @@
-{% import "_macros.html" as m %}
-<button class="btn {% if not u.canUpload %}btn-ghost{% endif %}" style="white-space:nowrap"
-  hx-post="/ui/admin/users/{{ u.id }}/toggle-upload" hx-swap="outerHTML">
-  {% if u.canUpload %}{{ m.icon("check") }}許可中{% else %}{{ m.icon("plus") }}許可する{% endif %}
-</button>
