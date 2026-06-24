@@ -147,9 +147,13 @@ document.body && document.body.addEventListener("htmx:afterSwap", (e) => {
     if (!pending || !fromChatForm(e.detail)) return;
     const xhr = e.detail.xhr;
     if (xhr && xhr.status === 200) {
-      // Replace the placeholder turn in place with the real answer.
+      // Replace the placeholder turn in place with the real answer. htmx 2.x
+      // reads the per-swap style override from `swapOverride` (NOT `swapStyle`),
+      // so without this the swap falls back to the form's `hx-swap="beforeend"`
+      // and the answer gets appended *inside* the pending turn — leaving the
+      // duplicate question + spinner. outerHTML replaces the pending node.
       e.detail.target = pending;
-      e.detail.swapStyle = "outerHTML";
+      e.detail.swapOverride = "outerHTML";
       e.detail.shouldSwap = true;
       pending = null; // consumed by the swap; afterRequest must not clean up
       pendingQuestion = "";

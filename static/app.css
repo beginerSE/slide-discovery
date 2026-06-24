@@ -762,6 +762,8 @@ label.field-label {
 .ingested-file-name { flex: 1; min-width: 0; }
 .ingested-file-meta { display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; }
 .ingested-file-time { color: hsl(var(--muted-foreground)); white-space: nowrap; }
+.ingested-file-list li.failed-file { flex-direction: column; align-items: stretch; gap: 0.1rem; }
+.failed-file-error { margin: 0; font-size: 0.72rem; }
 .file-row .ficon { width: 1.25rem; height: 1.25rem; color: hsl(var(--muted-foreground)); flex-shrink: 0; margin-top: 0.15rem; }
 .file-name { font-weight: 500; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-meta { font-size: 0.72rem; color: hsl(var(--muted-foreground)); margin-top: 0.25rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
