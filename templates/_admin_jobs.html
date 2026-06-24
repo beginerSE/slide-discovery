@@ -1,10 +1,5 @@
 {% import "_macros.html" as m %}
 {% set kind_map = {"manual": "全件取り込み", "retry": "再取り込み", "sync": "自動同期", "thumbs": "サムネイル再生成"} %}
-{% set jstatus_map = {
-  "running": ("実行中", "badge", "loader"),
-  "done": ("完了", "badge-primary", "check"),
-  "failed": ("失敗", "badge-destructive", "alert")
-} %}
 {% if jobs %}
 <div class="card">
   <div class="card-header">
@@ -16,7 +11,17 @@
     {% set done = (j.processed or 0) + (j.failed or 0) %}
     {% set running = j.status == "running" %}
     {% set pct = (done / total * 100) | round | int if total > 0 else (0 if running else 100) %}
-    {% set js = jstatus_map.get(j.status, ("", "badge-outline", "")) %}
+    {# 処理中 / 成功 / 一部失敗 / 失敗 — a finished job that had file-level failures
+       must NOT read as a clean 成功, so it is shown as 一部失敗 (amber). #}
+    {% if running %}
+      {% set js = ("処理中", "badge", "loader") %}
+    {% elif j.status == "done" and (j.failed or 0) > 0 %}
+      {% set js = ("一部失敗", "badge-amber", "alert") %}
+    {% elif j.status == "done" %}
+      {% set js = ("成功", "badge-primary", "check") %}
+    {% else %}
+      {% set js = ("失敗", "badge-destructive", "alert") %}
+    {% endif %}
     <div class="job-row">
       <div class="row between wrap gap-2">
         <div class="row gap-2" style="align-items:center">
@@ -49,7 +54,22 @@
         {% endif %}
       </div>
       {% endif %}
-      {% if j.message %}<p class="text-xs text-destructive truncate mt-1">⚠ {{ j.message }}</p>{% endif %}
+      {% if j.failedFiles %}
+      <details class="text-xs mt-1" open>
+        <summary class="text-destructive font-medium" style="cursor:pointer">{{ m.icon("alert") }}失敗したファイル（{{ j.failedFiles | length }}件）</summary>
+        <ul class="ingested-file-list">
+          {% for f in j.failedFiles %}
+          <li class="failed-file">
+            <span class="ingested-file-name truncate text-destructive" title="{{ f.name }}">{{ f.name or "（不明なファイル）" }}</span>
+            <span class="ingested-file-meta">
+              {% if f.at %}<span class="ingested-file-time">{{ f.at | jst }}</span>{% endif %}
+            </span>
+            {% if f.error %}<p class="failed-file-error text-destructive truncate" title="{{ f.error }}">⚠ {{ f.error }}</p>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </details>
+      {% elif j.message %}<p class="text-xs text-destructive truncate mt-1">⚠ {{ j.message }}</p>{% endif %}
       {% if j.ingestedFiles %}
       <details class="text-xs text-muted mt-1">
         <summary style="cursor:pointer">取り込んだファイル（{{ j.ingestedFiles | length }}件）</summary>
