@@ -31,23 +31,29 @@
         <div class="chat-source-grid">
           {% for s in sources %}
           <div class="chat-source-card">
-            <a href="/slides/{{ s.slideId }}" class="chat-source-main">
-              <div class="chat-source-thumb">
+            <div class="chat-source-main">
+              <a href="/slides/{{ s.slideId }}" class="chat-source-thumb">
                 {% if s.thumbnailPath %}
                 <img src="{{ s.thumbnailPath }}" alt="{{ s.slideTitle }}" loading="lazy" />
                 {% else %}
-                <div class="chat-source-noimg">{{ m.icon("presentation") }}</div>
+                <div class="chat-source-noimg">{{ m.source_fallback_icon(s) }}</div>
                 {% endif %}
-                <span class="chat-source-page">p.{{ s.pageNo }}</span>
-              </div>
+                {% if s.sourceType != "confluence" %}<span class="chat-source-page">p.{{ s.pageNo }}</span>{% endif %}
+              </a>
               <div class="chat-source-meta">
+                {% if s.sourceUrl %}
+                <a href="{{ s.sourceUrl }}" class="chat-source-file chat-source-file-link" title="{{ s.fileName }} を開く" target="_blank" rel="noopener noreferrer">
+                  {{ m.icon("file-text") }}<span class="chat-source-file-name">{{ s.fileName }}</span>{{ m.icon("external-link") }}
+                </a>
+                {% else %}
                 <div class="chat-source-file" title="{{ s.fileName }}">{{ m.icon("file-text") }}{{ s.fileName }}</div>
-                <div class="chat-source-ttl">{{ s.slideTitle or "無題のスライド" }}</div>
+                {% endif %}
+                <a href="/slides/{{ s.slideId }}" class="chat-source-ttl">{{ s.slideTitle or "無題のスライド" }}</a>
               </div>
-            </a>
+            </div>
             {% if s.sourceUrl %}
             <a href="{{ s.sourceUrl }}" class="chat-source-open" target="_blank" rel="noopener noreferrer">
-              {{ m.icon("external-link") }}資料を開く（p.{{ s.pageNo }}）
+              {{ m.icon("external-link") }}{% if s.sourceType == "confluence" %}ページを開く{% else %}資料を開く（p.{{ s.pageNo }}）{% endif %}
             </a>
             {% endif %}
           </div>

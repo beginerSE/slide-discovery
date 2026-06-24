@@ -22,12 +22,13 @@
     <div class="admin-slide-row">
       <div class="admin-thumb">
         {% if s.thumbnailPath %}<img src="{{ s.thumbnailPath }}" alt="{{ s.slideTitle }}" />
-        {% else %}{{ m.icon("file-text", "icon") }}{% endif %}
+        {% else %}{{ m.source_fallback_icon(s, "icon") }}{% endif %}
       </div>
       <div class="flex-1 space-y-sm">
         <div class="row wrap gap-2">
           <span class="font-medium text-sm truncate" title="{{ s.slideTitle }}">{{ s.slideTitle or "（タイトル未設定）" }}</span>
-          <span class="badge badge-outline">p.{{ s.pageNo }}</span>
+          {{ m.source_badge(s) }}
+          {% if s.sourceType != "confluence" %}<span class="badge badge-outline">p.{{ s.pageNo }}</span>{% endif %}
         </div>
         <div class="text-xs text-muted truncate" title="{{ s.fileName }}">{{ s.fileName }}</div>
         <div class="row wrap gap-2">

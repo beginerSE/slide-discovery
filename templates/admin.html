@@ -29,6 +29,10 @@
 
   <div id="admin-conflicts"></div>
 
+  <div id="admin-confluence" hx-get="/ui/admin/confluence" hx-trigger="load" hx-swap="innerHTML">
+    <div class="card"><div class="card-body text-sm text-muted">Confluence 連携を確認中…</div></div>
+  </div>
+
   <div id="admin-files" hx-get="/ui/admin/files" hx-trigger="load, every 5s, refreshAdminFiles from:body" hx-swap="innerHTML">
     {% include "_admin_files.html" %}
   </div>

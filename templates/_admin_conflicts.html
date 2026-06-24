@@ -19,6 +19,7 @@
       <input type="hidden" name="cf_fid" value="{{ c.fid }}">
       <input type="hidden" name="cf_url" value="{{ c.url }}">
       <input type="hidden" name="cf_name" value="{{ c.name }}">
+      <input type="hidden" name="cf_folder" value="{{ c.folder_id }}">
       <div class="stack" style="gap:0.4rem;padding-bottom:0.7rem;border-bottom:1px solid hsl(var(--border))">
         <div class="file-name row gap-2" title="{{ c.name }}">{{ m.icon("file-text", "ficon") }}{{ c.name }}</div>
         <div class="row wrap" style="gap:1rem" role="radiogroup">

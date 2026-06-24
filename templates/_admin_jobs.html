@@ -53,9 +53,15 @@
       {% if j.ingestedFiles %}
       <details class="text-xs text-muted mt-1">
         <summary style="cursor:pointer">取り込んだファイル（{{ j.ingestedFiles | length }}件）</summary>
-        <ul style="margin:0.25rem 0 0;padding-left:1.1rem;display:flex;flex-direction:column;gap:0.15rem">
+        <ul class="ingested-file-list">
           {% for f in j.ingestedFiles %}
-          <li class="truncate" title="{{ f }}">{{ f }}</li>
+          <li>
+            <span class="ingested-file-name truncate" title="{{ f.name }}">{{ f.name }}</span>
+            <span class="ingested-file-meta">
+              {% if f.slideCount is not none %}<span class="badge badge-outline">{{ f.slideCount }} スライド</span>{% endif %}
+              {% if f.at %}<span class="ingested-file-time">{{ f.at | jst }}</span>{% endif %}
+            </span>
+          </li>
           {% endfor %}
         </ul>
       </details>

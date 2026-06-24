@@ -16,7 +16,7 @@
       </div>
     </div>
     {% if slide.sourceUrl %}
-    <a href="{{ slide.sourceUrl }}" target="_blank" rel="noopener noreferrer" class="btn shrink-0">{{ m.icon("external-link") }}元資料を開く</a>
+    <a href="{{ slide.sourceUrl }}" target="_blank" rel="noopener noreferrer" class="btn shrink-0">{{ m.icon("external-link") }}{% if slide.sourceType == "confluence" %}Confluence で開く{% else %}元資料を開く{% endif %}</a>
     {% endif %}
   </div>
 
@@ -26,7 +26,7 @@
         {% if slide.thumbnailPath %}
         <img src="{{ slide.thumbnailPath }}" alt="{{ slide.slideTitle }}" />
         {% else %}
-        <div class="stack" style="align-items:center;color:hsl(var(--muted-foreground))">{{ m.icon("presentation", "icon-lg") }}<p class="mt-2">プレビュー画像がありません</p></div>
+        <div class="stack" style="align-items:center;color:hsl(var(--muted-foreground))">{{ m.source_fallback_icon(slide, "icon-lg") }}<p class="mt-2">{% if slide.sourceType == "confluence" %}Confluence ページ（プレビューなし）{% else %}プレビュー画像がありません{% endif %}</p></div>
         {% endif %}
       </div>
 
@@ -48,7 +48,8 @@
         <div>
           <div class="info-row"><span class="k">{{ m.icon("file-text") }}ファイル名</span><span class="v" title="{{ slide.fileName }}">{{ slide.fileName }}</span></div>
           {% if slide.client %}<div class="info-row"><span class="k">{{ m.icon("building") }}クライアント先</span><span class="v" title="{{ slide.client }}">{{ slide.client }}</span></div>{% endif %}
-          <div class="info-row"><span class="k">{{ m.icon("presentation") }}ページ</span><span class="v">p.{{ slide.pageNo }}</span></div>
+          <div class="info-row"><span class="k">{{ m.icon("layers") }}出どころ</span><span class="v">{% if slide.sourceType == "confluence" %}Confluence ページ{% else %}提案スライド（PowerPoint）{% endif %}</span></div>
+          {% if slide.sourceType != "confluence" %}<div class="info-row"><span class="k">{{ m.icon("presentation") }}ページ</span><span class="v">p.{{ slide.pageNo }}</span></div>{% endif %}
           <div class="info-row"><span class="k">{{ m.icon("lock") }}アクセス権</span><span class="v">{{ slide.accessLevel }}</span></div>
           <div class="info-row"><span class="k">{{ m.icon("calendar") }}更新日</span><span class="v">{{ slide.updatedAt[:10] | replace("-", "/") }}</span></div>
         </div>

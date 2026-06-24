@@ -10,9 +10,14 @@
 
   <div class="search-box">
     {{ m.icon("search", "search-icon") }}
-    <input class="input" type="text" name="q" placeholder="ファイル名で検索" autocomplete="off"
+    <input class="input" type="text" name="q" placeholder="ファイル名を入力してEnterまたは検索ボタン" autocomplete="off"
       hx-get="/ui/admin/files-list" hx-target="#file-list" hx-swap="innerHTML"
-      hx-trigger="keyup changed delay:300ms, search" />
+      hx-trigger="keyup[key=='Enter']" />
+    <button type="button" class="btn search-btn"
+      hx-get="/ui/admin/files-list" hx-target="#file-list" hx-swap="innerHTML"
+      hx-include="[name='q']">
+      {{ m.icon("search") }}<span>検索</span>
+    </button>
   </div>
 
   <div id="file-list">

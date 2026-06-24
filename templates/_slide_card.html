@@ -1,7 +1,9 @@
 {% import "_macros.html" as m %}
-<a href="/slides/{{ slide.slideId }}" class="slide-card">
+<div class="slide-card">
+  <a href="/slides/{{ slide.slideId }}" class="slide-card-link"
+     aria-label="{{ slide.slideTitle or '無題のスライド' }} の詳細を開く"></a>
   {% if sim_pct is defined and sim_pct is not none %}
-  <div style="position:absolute;top:0.5rem;left:0.5rem;z-index:10">
+  <div style="position:absolute;top:0.5rem;left:0.5rem;z-index:10;pointer-events:none">
     <span class="badge badge-primary mono" style="font-size:0.62rem">{{ sim_pct }}% Match</span>
   </div>
   {% endif %}
@@ -9,14 +11,15 @@
     {% if slide.thumbnailPath %}
     <img src="{{ slide.thumbnailPath }}" alt="{{ slide.slideTitle }}" loading="lazy" />
     {% else %}
-    <div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:hsl(var(--muted-foreground));opacity:0.4">{{ m.icon("presentation", "icon-lg") }}</div>
+    <div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:hsl(var(--muted-foreground));opacity:0.4">{{ m.source_fallback_icon(slide, "icon-lg") }}</div>
     {% endif %}
-    <div class="page-no">p.{{ slide.pageNo }}</div>
+    {% if slide.sourceType != "confluence" %}<div class="page-no">p.{{ slide.pageNo }}</div>{% endif %}
   </div>
   <div class="slide-card-body">
     <h3 class="slide-card-title">{{ slide.slideTitle or "無題のスライド" }}</h3>
     <div class="slide-file">{{ m.icon("file-text") }}<span title="{{ slide.fileName }}">{{ slide.fileName }}</span></div>
     <div class="row wrap" style="gap:0.25rem">
+      {{ m.source_badge(slide) }}
       {% if slide.industry %}<span class="badge">{{ slide.industry }}</span>{% endif %}
       {% if slide.proposalType %}<span class="badge badge-outline">{{ slide.proposalType }}</span>{% endif %}
       {% for t in (slide.tags or [])[:2] %}<span class="tag-mini">#{{ t }}</span>{% endfor %}
@@ -25,5 +28,9 @@
     {% if highlight and slide.matchReason %}
     <div class="match-reason"><span class="font-semibold">一致:</span> {{ slide.matchReason }}</div>
     {% endif %}
+    {% if slide.sourceType == "confluence" and slide.sourceUrl %}
+    <a href="{{ slide.sourceUrl }}" class="card-source-open" target="_blank" rel="noopener noreferrer"
+       title="Confluence ページを開く">{{ m.icon("external-link") }}Confluence で開く</a>
+    {% endif %}
   </div>
-</a>
+</div>

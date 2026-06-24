@@ -35,7 +35,23 @@
   "menu": '<line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>',
   "alert": '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
   "check": '<polyline points="20 6 9 17 4 12"/>',
-  "layers": '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>'
+  "layers": '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+  "image": '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
+  "message-circle": '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
+  "send": '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>'
 } %}
 <svg class="icon {{ cls }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{{ paths.get(name, "") | safe }}</svg>
+{%- endmacro %}
+
+{# Small "出どころ" badge: shown only for Confluence pages (PPTX is the default
+   and stays unlabelled to keep result cards clean). #}
+{% macro source_badge(slide) -%}
+{%- if slide.sourceType == "confluence" -%}
+<span class="badge badge-outline row gap-1" style="gap:0.2rem">{{ icon("file-text") }}Confluence</span>
+{%- endif -%}
+{%- endmacro %}
+
+{# Icon used for the no-thumbnail fallback, per source type. #}
+{% macro source_fallback_icon(slide, cls="") -%}
+{{ icon("file-text" if slide.sourceType == "confluence" else "presentation", cls) }}
 {%- endmacro %}

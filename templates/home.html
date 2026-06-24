@@ -10,10 +10,10 @@
         autocomplete="off"
         hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
         hx-trigger="keyup[key=='Enter']"
-        hx-include="#facet-state, [name='mode']" />
+        hx-include="#facet-state, [name='mode'], [name='source']" />
       <button type="button" class="btn search-btn"
         hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
-        hx-include="[name='q'], #facet-state, [name='mode']">
+        hx-include="[name='q'], #facet-state, [name='mode'], [name='source']">
         {{ m.icon("search") }}<span>検索</span>
       </button>
     </div>
@@ -22,16 +22,37 @@
       <label class="mode-option">
         <input type="radio" name="mode" value="keyword" {% if mode != 'semantic' %}checked{% endif %}
           hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
-          hx-trigger="change" hx-include="[name='q'], #facet-state" />
+          hx-trigger="change" hx-include="[name='q'], #facet-state, [name='source']" />
         <span>{{ m.icon("search") }}キーワード検索</span>
       </label>
       <label class="mode-option">
         <input type="radio" name="mode" value="semantic" {% if mode == 'semantic' %}checked{% endif %}
           hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
-          hx-trigger="change" hx-include="[name='q'], #facet-state" />
+          hx-trigger="change" hx-include="[name='q'], #facet-state, [name='source']" />
         <span>{{ m.icon("sparkles") }}セマンティック検索</span>
       </label>
     </div>
+
+    {% if has_confluence %}
+    {% set sel = sources or [] %}
+    <div class="source-toggle" role="group" aria-label="検索対象">
+      <span class="source-toggle-label">{{ m.icon("layers") }}検索対象</span>
+      <label class="source-option">
+        <input type="checkbox" name="source" value="pptx"
+          {% if not sel or 'pptx' in sel %}checked{% endif %}
+          hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
+          hx-trigger="change" hx-include="[name='q'], #facet-state, [name='mode'], [name='source']" />
+        <span>{{ m.icon("presentation") }}パワポ</span>
+      </label>
+      <label class="source-option">
+        <input type="checkbox" name="source" value="confluence"
+          {% if not sel or 'confluence' in sel %}checked{% endif %}
+          hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
+          hx-trigger="change" hx-include="[name='q'], #facet-state, [name='mode'], [name='source']" />
+        <span>{{ m.icon("file-text") }}Confluence</span>
+      </label>
+    </div>
+    {% endif %}
 
     <div class="hint-row">
       <span class="font-medium" style="color:hsl(var(--foreground))">検索のコツ:</span>

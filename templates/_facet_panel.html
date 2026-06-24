@@ -14,7 +14,7 @@
     {% for opt in options %}
     <button type="button" class="chip {% if facets.get(field) == opt.value %}active{% endif %}"
       hx-get="/ui/search" hx-vals='{{ toggled(facets, field, opt.value) }}'
-      hx-include="[name='q'], [name='mode']" hx-target="#facet-panel" hx-swap="innerHTML">
+      hx-include="[name='q'], [name='mode'], [name='source']" hx-target="#facet-panel" hx-swap="innerHTML">
       <span>{{ opt.value }}</span><span class="count">{{ opt.count }}</span>
     </button>
     {% endfor %}
@@ -31,7 +31,7 @@
   <h3 class="text-sm font-medium row gap-2" style="gap:0.5rem">{{ m.icon("layers") }}絞り込み</h3>
   {% if has_active %}
   <button type="button" class="btn btn-ghost btn-sm" hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
-    hx-include="[name='mode']"
+    hx-include="[name='mode'], [name='source']"
     hx-on:click="var el=document.querySelector('input[name=q]'); if(el) el.value='';">条件をクリア</button>
   {% endif %}
 </div>
