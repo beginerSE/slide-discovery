@@ -96,6 +96,32 @@ def parse_search_query(q: str | None) -> ParsedQuery:
     return parsed
 
 
+VALID_SOURCES = ("pptx", "confluence")
+
+
+def normalize_sources(values: list[str] | None) -> set[str] | None:
+    """Normalise a requested source-type filter into the set of
+    ``Slide.source_type`` values to restrict to, or ``None`` for "no
+    restriction" (search every source).
+
+    Shared by the search endpoint (``/api/slides``), the facet-count
+    endpoint (``/api/filters``) and the chat endpoint (``/api/ask``) so the
+    パワポ / コンフル filter behaves identically everywhere. Selecting both
+    sources (or none / unknown values) means "all", so we return ``None`` to
+    skip the SQL/in-memory predicate entirely.
+    """
+    if not values:
+        return None
+    sel = {
+        v.strip().lower()
+        for v in values
+        if v and v.strip().lower() in VALID_SOURCES
+    }
+    if not sel or sel == set(VALID_SOURCES):
+        return None
+    return sel
+
+
 def query_matches(parsed: ParsedQuery, haystack: str) -> bool:
     """Evaluate a parsed query against a plain-text haystack (substring,
     case-insensitive). Used for in-memory facet counting."""

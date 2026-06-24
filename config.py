@@ -212,6 +212,38 @@ def use_drive_api() -> bool:
     return is_gcp()
 
 
+# --- Confluence -------------------------------------------------------------
+
+def confluence_base_url() -> str | None:
+    """Confluence Cloud site base URL (e.g. ``https://your-site.atlassian.net``).
+
+    Stored without a trailing slash and without the ``/wiki`` suffix. Same path
+    in dev and prod — Confluence always authenticates with an API token (there
+    is no GCP-native variant), mirroring the Gemini dev/prod split.
+    """
+    v = (os.environ.get("CONFLUENCE_BASE_URL") or "").strip().rstrip("/")
+    return v or None
+
+
+def confluence_email() -> str | None:
+    """Atlassian account email that owns the API token (Basic-auth username)."""
+    v = (os.environ.get("CONFLUENCE_EMAIL") or "").strip()
+    return v or None
+
+
+def confluence_api_token() -> str | None:
+    """Confluence Cloud API token (Basic-auth password)."""
+    v = (os.environ.get("CONFLUENCE_API_TOKEN") or "").strip()
+    return v or None
+
+
+def confluence_enabled() -> bool:
+    """True only when all three Confluence settings are present."""
+    return bool(
+        confluence_base_url() and confluence_email() and confluence_api_token()
+    )
+
+
 # --- ADC --------------------------------------------------------------------
 
 @lru_cache(maxsize=8)
@@ -250,6 +282,7 @@ def describe() -> dict:
         "gemini": "vertex_ai" if use_vertex_ai() else "generative_language_api",
         "drive": "drive_api" if use_drive_api() else "public_share_link",
         "thumbnails": "gcs" if use_gcs_thumbnails() else "local_disk",
+        "confluence": "configured" if confluence_enabled() else "disabled",
     }
 
 

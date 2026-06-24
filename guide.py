@@ -1,95 +1,84 @@
-"""Record of phased-in incompatible language changes.
+"""User guide page content: storage + Markdown rendering.
 
-Each line is of the form:
+The guide is a single Markdown document an admin can edit from the UI. It is
+persisted in the ``app_state`` key/value table (key ``GUIDE_KEY``) so it
+survives restarts and is shared across instances, and rendered to HTML on read.
 
-    FeatureName = "_Feature(" OptionalRelease "," MandatoryRelease ","
-                              CompilerFlag ")"
+Only admins can edit the guide, so the stored Markdown is trusted authoring
+input; it is rendered with the standard ``markdown`` library (tables / fenced
+code / line breaks) for a friendly beginner-facing page.
+"""
+from __future__ import annotations
 
-where, normally, OptionalRelease < MandatoryRelease, and both are 5-tuples
-of the same form as sys.version_info:
+import markdown as _markdown
+from sqlalchemy.ext.asyncio import AsyncSession
 
-    (PY_MAJOR_VERSION, # the 2 in 2.1.0a3; an int
-     PY_MINOR_VERSION, # the 1; an int
-     PY_MICRO_VERSION, # the 0; an int
-     PY_RELEASE_LEVEL, # "alpha", "beta", "candidate" or "final"; string
-     PY_RELEASE_SERIAL # the 3; an int
-    )
+from db import AppState
 
-OptionalRelease records the first release in which
+GUIDE_KEY = "user_guide"
 
-    from __future__ import FeatureName
+DEFAULT_GUIDE = """# 提案スライド検索の使い方
 
-was accepted.
+このツールは、社内に蓄積された過去の提案資料（PowerPoint）を
+**キーワード**や**自然文（意味）**で横断検索できる社内向けツールです。
 
-In the case of MandatoryReleases that have not yet occurred,
-MandatoryRelease predicts the release in which the feature will become part
-of the language.
+## はじめに
 
-Else MandatoryRelease records when the feature became part of the language;
-in releases at or after that, modules no longer need
+1. 左メニューの **スライド検索** を開きます。
+2. 検索ボックスにキーワードや調べたい内容を入力します。
+   - 例: `小売 DX 提案`、`コスト削減の効果を示すグラフ`
+3. 結果カードのサムネイルをクリックすると、スライドの詳細が見られます。
+4. 詳細ページからは、元の資料（スライド）も開けます。
 
-    from __future__ import FeatureName
+## 2つの検索方法
 
-to use the feature in question, but may continue to use such imports.
+| 方法 | こんなときに | 特徴 |
+| --- | --- | --- |
+| スライド検索 | キーワードで素早く探したい | 絞り込み（業界・顧客・提案種別など）が使える |
+| 対話検索 | 「〜な資料ある？」と相談したい | 質問に対してAIが要約し、根拠スライドを提示 |
 
-MandatoryRelease may also be None, meaning that a planned feature got
-dropped or that the release version is undetermined.
+## 絞り込み（フィルタ）
 
-Instances of class _Feature have two corresponding methods,
-.getOptionalRelease() and .getMandatoryRelease().
+検索結果の左側で、業界・顧客・提案種別・グラフ種別・タグで絞り込めます。
+複数を組み合わせると、より目的に近い資料が見つかります。
 
-CompilerFlag is the (bitfield) flag that should be passed in the fourth
-argument to the builtin function compile() to enable the feature in
-dynamically compiled code.  This flag is stored in the .compiler_flag
-attribute on _Future instances.  These values must match the appropriate
-#defines of CO_xxx flags in Include/cpython/compile.h.
+## 対話検索
 
-No feature line is ever to be deleted from this file.
+左メニューの **対話検索** では、知りたいことを文章で質問できます。
+AIが関連スライドを探して回答し、参考にしたスライドを一覧で表示します。
+回答の下の「資料を開く」から、元の資料の該当ページへ直接ジャンプできます。
+
+## 困ったときは
+
+- 検索しても出てこない → キーワードを短くしたり、言い換えてみてください。
+- 資料が見つからない → 管理者に資料の取り込みを依頼してください。
+
+> このページの内容は管理者が編集できます。
 """
 
-from typing_extensions import TypeAlias
 
-_VersionInfo: TypeAlias = tuple[int, int, int, str, int]
+def render_markdown(text: str) -> str:
+    """Render the guide Markdown to HTML for display."""
+    return _markdown.markdown(
+        text or "",
+        extensions=["extra", "sane_lists", "nl2br"],
+        output_format="html",
+    )
 
-class _Feature:
-    def __init__(self, optionalRelease: _VersionInfo, mandatoryRelease: _VersionInfo | None, compiler_flag: int) -> None: ...
-    def getOptionalRelease(self) -> _VersionInfo:
-        """Return first release in which this feature was recognized.
 
-        This is a 5-tuple, of the same form as sys.version_info.
-        """
+async def get_guide_markdown(session: AsyncSession) -> str:
+    """Return the stored guide Markdown, or the default if none is saved yet."""
+    row = await session.get(AppState, GUIDE_KEY)
+    if row is None or not (row.value or "").strip():
+        return DEFAULT_GUIDE
+    return row.value
 
-    def getMandatoryRelease(self) -> _VersionInfo | None:
-        """Return release in which this feature will become mandatory.
 
-        This is a 5-tuple, of the same form as sys.version_info, or, if
-        the feature was dropped, or the release date is undetermined, is None.
-        """
-    compiler_flag: int
-
-absolute_import: _Feature
-division: _Feature
-generators: _Feature
-nested_scopes: _Feature
-print_function: _Feature
-unicode_literals: _Feature
-with_statement: _Feature
-barry_as_FLUFL: _Feature
-generator_stop: _Feature
-annotations: _Feature
-
-all_feature_names: list[str]  # undocumented
-
-__all__ = [
-    "all_feature_names",
-    "absolute_import",
-    "division",
-    "generators",
-    "nested_scopes",
-    "print_function",
-    "unicode_literals",
-    "with_statement",
-    "barry_as_FLUFL",
-    "generator_stop",
-    "annotations",
-]
+async def set_guide_markdown(session: AsyncSession, text: str) -> None:
+    """Persist the guide Markdown (upsert into ``app_state``)."""
+    row = await session.get(AppState, GUIDE_KEY)
+    if row is None:
+        session.add(AppState(key=GUIDE_KEY, value=text))
+    else:
+        row.value = text
+    await session.commit()

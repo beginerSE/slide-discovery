@@ -28,6 +28,7 @@ log = logging.getLogger("ingest.drive")
 _DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 _PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 _GSLIDES_MIME = "application/vnd.google-apps.presentation"
+_FOLDER_MIME = "application/vnd.google-apps.folder"
 
 _FOLDER_PATTERNS = [
     re.compile(r"/drive/folders/([a-zA-Z0-9_-]{20,})"),
@@ -111,48 +112,101 @@ def _unescape_html(s: str) -> str:
     return _html.unescape(s).strip()
 
 
-async def _list_folder_files_public(folder_id: str) -> list[tuple[str, str]]:
-    """List files (file_id, file_name) inside a public Drive folder.
+def _parse_public_folder_html(html: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Parse an 'embeddedfolderview' page into (pptx_files, subfolder_ids).
 
-    Uses the public 'embeddedfolderview' page (no auth required), filtered
-    to .ppt/.pptx by filename. Raises RuntimeError if the folder isn't
-    publicly accessible.
+    ``pptx_files`` is a list of ``(file_id, file_name)`` for .ppt/.pptx
+    entries; ``subfolder_ids`` is the list of child folder ids. A flip-entry
+    is recognised as a folder when its icon URL carries the Drive folder mime
+    type (``application/vnd.google-apps.folder``).
     """
-    url = f"https://drive.google.com/embeddedfolderview?id={folder_id}#list"
-    timeout = httpx.Timeout(30.0, read=60.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        r = await client.get(url)
-    if r.status_code == 404:
-        raise RuntimeError(
-            f"フォルダが見つかりません (id={folder_id}). 共有設定を確認してください。"
-        )
-    r.raise_for_status()
-    html = r.text
-    if "flip-entries" not in html and "flip-entry" not in html:
-        raise RuntimeError(
-            "フォルダの中身を取得できませんでした。"
-            "「リンクを知っている全員」に公開されているか確認してください。"
-        )
-    # Split on each flip-entry boundary; the first chunk is the header
-    # before any entry and is discarded.
     chunks = _FOLDER_ENTRY_SPLIT_RE.split(html)[1:]
-    out: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    files: list[tuple[str, str]] = []
+    folders: list[str] = []
+    seen_files: set[str] = set()
+    seen_folders: set[str] = set()
     for chunk in chunks:
-        # Only look at the part of this chunk up to the next entry boundary
-        # (already split) — but stop at closing </div></div></div> for safety.
         id_m = _ENTRY_ID_RE.search(chunk)
-        title_m = _ENTRY_TITLE_RE.search(chunk)
-        if not id_m or not title_m:
+        if not id_m:
             continue
-        fid = id_m.group(1)
+        eid = id_m.group(1)
+        if _FOLDER_MIME in chunk:
+            if eid not in seen_folders:
+                seen_folders.add(eid)
+                folders.append(eid)
+            continue
+        title_m = _ENTRY_TITLE_RE.search(chunk)
+        if not title_m:
+            continue
         name = _unescape_html(title_m.group(1))
-        if fid in seen:
+        if eid in seen_files:
             continue
         if not _PPTX_EXT_RE.search(name):
             continue
-        seen.add(fid)
-        out.append((fid, name))
+        seen_files.add(eid)
+        files.append((eid, name))
+    return files, folders
+
+
+async def _list_folder_files_public(folder_id: str) -> list[tuple[str, str, str]]:
+    """List .ppt/.pptx files under a public Drive folder, recursing subfolders.
+
+    Returns ``(file_id, file_name, parent_folder_id)`` where ``parent_folder_id``
+    is the immediate folder the file was found in (so a recurring-meeting series
+    keys off the nearest subfolder, not the top folder). Uses the public
+    'embeddedfolderview' page (no auth). Raises RuntimeError only if the *top*
+    folder isn't publicly accessible; unreadable subfolders are skipped.
+    """
+    out: list[tuple[str, str, str]] = []
+    seen_files: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = [folder_id]
+    timeout = httpx.Timeout(30.0, read=60.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            is_top = current == folder_id
+            url = f"https://drive.google.com/embeddedfolderview?id={current}#list"
+            try:
+                r = await client.get(url)
+                not_found = r.status_code == 404
+                r.raise_for_status()
+                html = r.text
+            except Exception as e:  # noqa: BLE001 — HTTP 404/403/429/5xx, network
+                if not is_top:
+                    log.warning("subfolder unreadable, skipping id=%s: %s", current, e)
+                    continue
+                if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
+                    raise RuntimeError(
+                        f"フォルダが見つかりません (id={folder_id}). "
+                        "共有設定を確認してください。"
+                    ) from e
+                raise RuntimeError(
+                    "フォルダの中身を取得できませんでした。"
+                    "「リンクを知っている全員」に公開されているか確認してください。"
+                ) from e
+            if not_found or (
+                "flip-entries" not in html and "flip-entry" not in html
+            ):
+                if is_top:
+                    raise RuntimeError(
+                        "フォルダの中身を取得できませんでした。"
+                        "「リンクを知っている全員」に公開されているか確認してください。"
+                    )
+                log.warning("subfolder unreadable, skipping id=%s", current)
+                continue
+            files, subfolders = _parse_public_folder_html(html)
+            for fid, name in files:
+                if fid in seen_files:
+                    continue
+                seen_files.add(fid)
+                out.append((fid, name, current))
+            for sub in subfolders:
+                if sub not in visited:
+                    stack.append(sub)
     return out
 
 
@@ -257,37 +311,56 @@ def is_pptx(name: str, mime: str) -> bool:
     return _is_pptx(name, mime)
 
 
-async def _list_folder_files_api(folder_id: str) -> list[tuple[str, str]]:
-    def _run() -> list[tuple[str, str]]:
+async def _list_folder_files_api(folder_id: str) -> list[tuple[str, str, str]]:
+    """List .ppt/.pptx files under a folder, recursing into subfolders.
+
+    Returns ``(file_id, file_name, parent_folder_id)`` where
+    ``parent_folder_id`` is the immediate folder the file lives in.
+    """
+    def _run() -> list[tuple[str, str, str]]:
         svc = _drive_service()
-        out: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        page_token: str | None = None
-        while True:
-            resp = (
-                svc.files()
-                .list(
-                    q=f"'{folder_id}' in parents and trashed = false",
-                    fields="nextPageToken, files(id, name, mimeType)",
-                    pageSize=1000,
-                    supportsAllDrives=True,
-                    includeItemsFromAllDrives=True,
-                    pageToken=page_token,
+        out: list[tuple[str, str, str]] = []
+        seen_files: set[str] = set()
+        visited: set[str] = set()
+        stack: list[str] = [folder_id]
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            page_token: str | None = None
+            while True:
+                resp = (
+                    svc.files()
+                    .list(
+                        q=f"'{current}' in parents and trashed = false",
+                        fields="nextPageToken, files(id, name, mimeType)",
+                        pageSize=1000,
+                        supportsAllDrives=True,
+                        includeItemsFromAllDrives=True,
+                        pageToken=page_token,
+                    )
+                    .execute()
                 )
-                .execute()
-            )
-            for f in resp.get("files", []):
-                fid = f.get("id")
-                name = f.get("name", "")
-                if not fid or fid in seen:
-                    continue
-                if not _is_pptx(name, f.get("mimeType", "")):
-                    continue
-                seen.add(fid)
-                out.append((fid, name))
-            page_token = resp.get("nextPageToken")
-            if not page_token:
-                break
+                for f in resp.get("files", []):
+                    fid = f.get("id")
+                    name = f.get("name", "")
+                    mime = f.get("mimeType", "")
+                    if not fid:
+                        continue
+                    if mime == _FOLDER_MIME:
+                        if fid not in visited:
+                            stack.append(fid)
+                        continue
+                    if fid in seen_files:
+                        continue
+                    if not _is_pptx(name, mime):
+                        continue
+                    seen_files.add(fid)
+                    out.append((fid, name, current))
+                page_token = resp.get("nextPageToken")
+                if not page_token:
+                    break
         return out
 
     try:
@@ -343,8 +416,13 @@ async def _download_api(file_id: str, out_dir: Path) -> DownloadResult:
 
 # --- Public dispatchers (select backend per config) ------------------------
 
-async def list_folder_files(folder_id: str) -> list[tuple[str, str]]:
-    """List .ppt/.pptx files (file_id, file_name) inside a Drive folder."""
+async def list_folder_files(folder_id: str) -> list[tuple[str, str, str]]:
+    """List .ppt/.pptx files inside a Drive folder, recursing subfolders.
+
+    Returns ``(file_id, file_name, parent_folder_id)`` — ``parent_folder_id`` is
+    the immediate folder each file was found in (the recurring-meeting series
+    key), which may be a subfolder of the requested ``folder_id``.
+    """
     if config.use_drive_api():
         return await _list_folder_files_api(folder_id)
     return await _list_folder_files_public(folder_id)

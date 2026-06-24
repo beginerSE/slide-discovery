@@ -93,19 +93,29 @@ async def resolve_input_entries(
     seen_file_ids: set[str] = {fid for fid, _ in file_entries}
     known_names: dict[str, str] = {}
     file_folder: dict[str, str] = {}
-    for folder_id in folder_ids:
+    registered_folders: set[str] = set()
+
+    async def _ensure_folder_watched(fid: str) -> None:
+        # Register each (sub)folder we discover so the incremental change
+        # poller watches it too; safe to call repeatedly within one call.
+        if not fid or fid in registered_folders:
+            return
+        registered_folders.add(fid)
         existing_folder = (
             await session.execute(
-                select(DriveFolder).where(DriveFolder.drive_folder_id == folder_id)
+                select(DriveFolder).where(DriveFolder.drive_folder_id == fid)
             )
         ).scalar_one_or_none()
         if existing_folder is None:
             session.add(
                 DriveFolder(
-                    drive_folder_id=folder_id,
-                    share_url=f"https://drive.google.com/drive/folders/{folder_id}",
+                    drive_folder_id=fid,
+                    share_url=f"https://drive.google.com/drive/folders/{fid}",
                 )
             )
+
+    for folder_id in folder_ids:
+        await _ensure_folder_watched(folder_id)
         try:
             items = await list_folder_files(folder_id)
         except Exception as e:  # noqa: BLE001
@@ -114,12 +124,15 @@ async def resolve_input_entries(
             continue
         if not items:
             folder_errors.append(
-                f"{folder_id}: フォルダ内に .pptx ファイルが見つかりませんでした"
+                f"{folder_id}: フォルダ内（サブフォルダ含む）に .pptx "
+                "ファイルが見つかりませんでした"
             )
             continue
-        for fid, fname in items:
+        for fid, fname, parent_id in items:
+            parent_id = parent_id or folder_id
+            await _ensure_folder_watched(parent_id)
             known_names[fid] = fname
-            file_folder.setdefault(fid, folder_id)
+            file_folder.setdefault(fid, parent_id)
             if fid in seen_file_ids:
                 continue
             seen_file_ids.add(fid)

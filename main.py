@@ -8,7 +8,7 @@ import os
 from collections import Counter
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
@@ -34,7 +34,12 @@ from db import (
 from gemini_embed import embed_text
 import thumbnail_store
 from ingest import reap_orphaned_jobs, schedule_backfill_embeddings
-from search_query import ParsedQuery, parse_search_query, query_matches
+from search_query import (
+    ParsedQuery,
+    normalize_sources,
+    parse_search_query,
+    query_matches,
+)
 from scheduler import start_scheduler, stop_scheduler
 from thumbnail import render_thumbnail_svg
 
@@ -285,11 +290,14 @@ async def search_slides(
     graphType: Optional[str] = None,
     layoutType: Optional[str] = None,
     tag: Optional[str] = None,
+    source: Optional[List[str]] = Query(None),
     limit: int = Query(60, ge=1, le=200),
     offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_session),
 ):
     q_clean = (q or "").strip()
+    # パワポ / コンフル の検索対象フィルター。両方（または未指定）は None＝全件。
+    source_restrict = normalize_sources(source)
     active_facets = [
         ("業界", industry),
         ("クライアント先", client),
@@ -319,6 +327,8 @@ async def search_slides(
                     tag_json=json.dumps([tag])
                 )
             )
+        if source_restrict is not None:
+            stmt = stmt.where(Slide.source_type.in_(source_restrict))
         return stmt
 
     parsed = parse_search_query(q_clean)
@@ -399,6 +409,8 @@ class AskBody(BaseModel):
     question: str
     topK: int = 8
     seriesId: Optional[str] = None
+    # パワポ / コンフル の検索対象フィルター（search_slides と同じ意味）。
+    sources: Optional[List[str]] = None
 
 
 @app.post("/api/ask")
@@ -416,7 +428,12 @@ async def ask_question(
 
     top_k = max(1, min(int(body.topK or 8), 20))
     res = await search_slides(
-        q=question, mode="semantic", limit=top_k, offset=0, session=session
+        q=question,
+        mode="semantic",
+        limit=top_k,
+        offset=0,
+        source=body.sources,
+        session=session,
     )
     sources = res["items"]
     if not sources:
@@ -567,6 +584,7 @@ async def get_filters(
     graphType: Optional[str] = None,
     layoutType: Optional[str] = None,
     tag: Optional[str] = None,
+    source: Optional[List[str]] = Query(None),
     session: AsyncSession = Depends(get_session),
 ):
     """Return facet counts. Counts are contextual: when computing the
@@ -580,6 +598,10 @@ async def get_filters(
 
     q_clean = (q or "").strip()
     slides = await _all_slides(session)
+    # Keep facet counts consistent with the パワポ / コンフル search filter.
+    source_restrict = normalize_sources(source)
+    if source_restrict is not None:
+        slides = [s for s in slides if s.get("sourceType") in source_restrict]
     parsed = parse_search_query(q_clean)
 
     # Pre-filter once with q. Uses the same AND/OR/exclusion parsing as

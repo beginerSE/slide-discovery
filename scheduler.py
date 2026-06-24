@@ -21,6 +21,7 @@ import config
 from drive_sync import sync_drive_changes
 from ingest import (
     backfill_missing_embeddings,
+    reap_stalled_jobs,
     schedule_ingest_background,
 )
 
@@ -48,6 +49,17 @@ async def _changes_tick():
             log.info("drive changes sync: %s", result)
     except Exception:
         log.exception("drive changes sync crashed")
+
+
+async def _reaper_tick():
+    # Fail any ingest job that has stopped making progress (crashed mid-run)
+    # so it stops blocking single-flight scheduling and clears from the UI.
+    try:
+        reaped = await reap_stalled_jobs()
+        if reaped:
+            log.info("reaped %d stalled ingest job(s)", reaped)
+    except Exception:
+        log.exception("stalled-job reaper crashed")
 
 
 async def _embedding_tick():
@@ -103,6 +115,13 @@ def start_scheduler() -> None:
         "interval",
         minutes=5,
         id="embedding-backfill-tick",
+        max_instances=1,
+    )
+    _scheduler.add_job(
+        _reaper_tick,
+        "interval",
+        minutes=5,
+        id="stalled-job-reaper-tick",
         max_instances=1,
     )
     _scheduler.start()

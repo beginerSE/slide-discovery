@@ -12,6 +12,7 @@ from pathlib import Path
 from sqlalchemy import delete, func, select, update
 
 import config
+import confluence
 from db import DriveFile, IngestJob, SessionLocal, Slide, utcnow
 from drive import DownloadResult, download, view_url
 from gemini_embed import build_slide_embed_text, embed_text
@@ -1320,3 +1321,235 @@ def schedule_backfill_embeddings() -> None:
             log.exception("embedding backfill task crashed")
 
     asyncio.create_task(_run())
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Confluence ingest: one Confluence Cloud page = one Slide row
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _conf_slide_id(page_id: str) -> str:
+    return f"cf-{page_id}"
+
+
+def _conf_file_id(page_id: str) -> str:
+    """Namespaced file id so a Confluence page never collides with a Drive
+    file id (Drive ids are bare; Confluence ids are ``conf:<pageId>``)."""
+    return f"conf:{page_id}"
+
+
+def _conf_fingerprint(version: int) -> str:
+    return f"confv:{version}"
+
+
+def _stale_confluence_ids(
+    existing_ids: set[str], seen_ids: set[str]
+) -> set[str]:
+    """Slide ids of a space's Confluence rows that no longer exist upstream.
+
+    Pure set diff so the "prune pages deleted from the space" rule is unit
+    testable without a DB: any previously-stored id we did NOT see in the
+    current page listing is stale and should be removed.
+    """
+    return existing_ids - seen_ids
+
+
+async def _upsert_confluence_page(
+    session_factory,
+    page: confluence.ConfluencePage,
+    space_id: str,
+    fingerprint: str,
+) -> str:
+    """Insert/refresh one Confluence page as a Slide row; returns its slide_id.
+
+    Clears the embedding so the caller re-embeds (content is new or changed).
+    Confluence pages have no thumbnail (the UI shows an icon) and are not part
+    of a 定例 series, so the folder/date fields stay empty. ``source_space_id``
+    records the owning space so a re-ingest can prune deleted pages.
+    """
+    slide_id = _conf_slide_id(page.id)
+    fields = dict(
+        file_id=_conf_file_id(page.id),
+        file_name=page.title,
+        page_no=1,
+        slide_title=page.title,
+        slide_text=page.text,
+        industry="",
+        client="",
+        proposal_type="",
+        graph_type="",
+        layout_type="",
+        tags=[],
+        summary="",
+        reuse_hint="",
+        thumbnail_path="",
+        source_url=page.url,
+        access_level="internal",
+        source_fingerprint=fingerprint,
+        source_type="confluence",
+        source_space_id=str(space_id),
+        folder_id="",
+        folder_name="",
+        doc_date=None,
+    )
+    async with session_factory() as session:
+        row = await session.get(Slide, slide_id)
+        if row is None:
+            session.add(Slide(slide_id=slide_id, embedding=None, **fields))
+        else:
+            for key, value in fields.items():
+                setattr(row, key, value)
+            row.embedding = None
+        await session.commit()
+    return slide_id
+
+
+async def run_confluence_ingest(
+    space_id: str,
+    *,
+    actor_label: str = "",
+    job_id: int | None = None,
+) -> dict:
+    """Ingest every page of one Confluence space into ``slides``.
+
+    Mirrors ``run_ingest`` job bookkeeping (one ``ingest_jobs`` row with live
+    progress, a heartbeat, and cooperative DB-driven cancel). One page = one
+    slide row; a page is skipped when its stored version fingerprint already
+    matches and an embedding exists, else it is re-fetched and re-embedded
+    through the shared Gemini embedding path.
+    """
+    if job_id is None:
+        job_id = await _create_job("confluence", actor_label)
+    tracker = JobTracker(job_id)
+
+    async def _heartbeat_loop() -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await tracker.heartbeat()
+            except Exception:  # noqa: BLE001
+                log.debug("heartbeat write failed", exc_info=True)
+
+    heartbeat = asyncio.create_task(_heartbeat_loop())
+    embed_sem = asyncio.Semaphore(4)
+
+    async def _embed_one(slide_id: str, text: str) -> None:
+        async with embed_sem:
+            try:
+                vec = await embed_text(text, task_type="RETRIEVAL_DOCUMENT")
+            except Exception as e:  # noqa: BLE001
+                log.warning("confluence embed failed for %s: %s", slide_id, e)
+                vec = None
+        if vec is not None:
+            async with SessionLocal() as session:
+                row = await session.get(Slide, slide_id)
+                if row is not None:
+                    row.embedding = vec
+                    await session.commit()
+
+    try:
+        space = await confluence.get_space(space_id)
+        if space is None:
+            raise RuntimeError(f"スペースが見つかりません (id={space_id})")
+        await tracker.set_current_file(f"Confluence: {space.name}")
+        await tracker.set_stage("ページ一覧取得中")
+        pages = await confluence.list_pages(space_id)
+        await tracker.set_total(len(pages))
+        log.info(
+            "confluence ingest %d start: space=%s pages=%d",
+            job_id, space.key, len(pages),
+        )
+        seen_ids: set[str] = set()
+        for page in pages:
+            await tracker.set_stage("ページ取得・整形中")
+            fingerprint = _conf_fingerprint(page.version)
+            slide_id = _conf_slide_id(page.id)
+            seen_ids.add(slide_id)
+            try:
+                async with SessionLocal() as session:
+                    existing = await session.get(Slide, slide_id)
+                    unchanged = (
+                        existing is not None
+                        and existing.source_fingerprint == fingerprint
+                        and existing.embedding is not None
+                    )
+                if not unchanged:
+                    await _upsert_confluence_page(
+                        SessionLocal, page, space.id, fingerprint
+                    )
+                    await _embed_one(
+                        slide_id,
+                        build_slide_embed_text(
+                            title=page.title,
+                            summary="",
+                            body_text=page.text,
+                            industry="",
+                            proposal_type="",
+                            graph_type="",
+                            layout_type="",
+                            tags=[],
+                            client="",
+                        ),
+                    )
+                await tracker.file_done(page.title)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                await tracker.file_failed(f"{page.id}: {e}")
+        # Prune pages deleted from this space since the last ingest. Scoped to
+        # source_space_id so other spaces' rows are never touched.
+        await tracker.set_stage("削除ページの整理中")
+        async with SessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(Slide.slide_id).where(
+                        Slide.source_type == "confluence",
+                        Slide.source_space_id == str(space.id),
+                    )
+                )
+            ).scalars().all()
+            stale = _stale_confluence_ids(set(rows), seen_ids)
+            if stale:
+                await session.execute(
+                    delete(Slide).where(Slide.slide_id.in_(stale))
+                )
+                await session.commit()
+                log.info(
+                    "confluence ingest %d pruned %d deleted pages",
+                    job_id, len(stale),
+                )
+        await tracker.finish("done")
+        log.info("confluence ingest %d done: pages=%d", job_id, len(pages))
+    except asyncio.CancelledError:
+        log.info("confluence ingest %d cancelled", job_id)
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.exception("confluence ingest failed")
+        await tracker.finish("failed", message=str(e))
+    finally:
+        heartbeat.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat
+    return {"jobId": job_id}
+
+
+async def schedule_confluence_ingest(
+    space_id: str, *, actor_label: str = ""
+) -> bool:
+    """Kick off a single-flight background Confluence ingest.
+
+    Refused (returns False) while another ``confluence`` job is running, so a
+    space can't be ingested twice at once. Reserves the job row under
+    ``_SCHEDULE_LOCK`` just like ``schedule_ingest_background``.
+    """
+    async with _SCHEDULE_LOCK:
+        await reap_stalled_jobs()
+        if await _count_running("confluence") > 0:
+            return False
+        job_id = await _create_job("confluence", actor_label)
+    task = asyncio.create_task(
+        run_confluence_ingest(space_id, actor_label=actor_label, job_id=job_id)
+    )
+    _RUNNING_TASKS[job_id] = task
+    task.add_done_callback(lambda _t, jid=job_id: _RUNNING_TASKS.pop(jid, None))
+    return True

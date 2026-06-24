@@ -168,6 +168,17 @@ class Slide(Base):
     # current file content" (reuse) apart from "stale page from an older
     # version" (must recompute). NULL on legacy rows ingested before resume.
     source_fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Origin of this row: "pptx" (Drive-ingested PowerPoint slide) or
+    # "confluence" (Confluence Cloud page). Lets search/UI distinguish sources.
+    # Legacy rows predate this column and default to "pptx".
+    source_type: Mapped[str] = mapped_column(
+        String, nullable=False, default="pptx", server_default=text("'pptx'")
+    )
+    # For Confluence rows: the source space id (so a re-ingest can prune pages
+    # deleted from that space without touching other spaces). Empty for PPTX.
+    source_space_id: Mapped[str] = mapped_column(
+        String, nullable=False, default="", server_default=text("''")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
@@ -193,6 +204,7 @@ class Slide(Base):
             "reuseHint": self.reuse_hint,
             "thumbnailPath": self.thumbnail_path,
             "sourceUrl": self.source_url,
+            "sourceType": self.source_type,
             "accessLevel": self.access_level,
             "folderId": self.folder_id,
             "folderName": self.folder_name,
@@ -521,6 +533,18 @@ async def init_db() -> None:
         await conn.execute(
             text(
                 "ALTER TABLE slides ADD COLUMN IF NOT EXISTS client "
+                "varchar NOT NULL DEFAULT ''"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE slides ADD COLUMN IF NOT EXISTS source_type "
+                "varchar NOT NULL DEFAULT 'pptx'"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE slides ADD COLUMN IF NOT EXISTS source_space_id "
                 "varchar NOT NULL DEFAULT ''"
             )
         )

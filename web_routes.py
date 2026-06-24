@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
@@ -103,6 +103,36 @@ def _read_facets(request: Request) -> dict:
     return {f: (qp.get(f) or "").strip() for f in _FACET_FIELDS}
 
 
+# Valid 検索対象 (source_type) values for the パワポ / コンフル filter.
+_SOURCE_FIELDS = ("pptx", "confluence")
+
+
+def _read_sources(request: Request) -> list[str]:
+    """The selected 検索対象 from `?source=` (repeatable). Empty list means the
+    user hasn't narrowed the sources → search everything (handled downstream
+    by `normalize_sources`)."""
+    vals = [
+        v.strip().lower()
+        for v in request.query_params.getlist("source")
+        if v and v.strip().lower() in _SOURCE_FIELDS
+    ]
+    # De-dup while preserving a stable order.
+    return [s for s in _SOURCE_FIELDS if s in vals]
+
+
+async def _has_confluence(session) -> bool:
+    """True when at least one Confluence page has been ingested, so the UI only
+    surfaces the パワポ / コンフル toggle when it is actually meaningful."""
+    row = (
+        await session.execute(
+            select(Slide.slide_id)
+            .where(Slide.source_type == "confluence")
+            .limit(1)
+        )
+    ).first()
+    return row is not None
+
+
 def _user_dict(user) -> Optional[dict]:
     return user.to_dict() if user else None
 
@@ -122,10 +152,13 @@ def _login_redirect(request: Request) -> RedirectResponse:
 # ─────────────────────────────────────────────────────────────────────
 
 
-async def _search_context(session, q: str, facets: dict, mode: str = "keyword") -> dict:
+async def _search_context(
+    session, q: str, facets: dict, mode: str = "keyword", sources: list | None = None
+) -> dict:
     import main
 
     mode = "semantic" if mode == "semantic" else "keyword"
+    sources = sources or []
     has_query = bool(q)
     has_active = bool(q) or any(facets.values())
 
@@ -136,12 +169,15 @@ async def _search_context(session, q: str, facets: dict, mode: str = "keyword") 
         proposalType=facets["proposalType"] or None,
         graphType=facets["graphType"] or None,
         tag=facets["tag"] or None,
+        source=sources or None,
         session=session,
     )
     ctx = {
         "q": q,
         "facets": facets,
         "mode": mode,
+        "sources": sources,
+        "has_confluence": await _has_confluence(session),
         "has_active": has_active,
         "has_query": has_query,
         "filters": filters,
@@ -155,6 +191,7 @@ async def _search_context(session, q: str, facets: dict, mode: str = "keyword") 
             proposalType=facets["proposalType"] or None,
             graphType=facets["graphType"] or None,
             tag=facets["tag"] or None,
+            source=sources or None,
             limit=SEARCH_LIMIT,
             offset=0,
             session=session,
@@ -175,7 +212,8 @@ async def home(request: Request):
         q = (request.query_params.get("q") or "").strip()
         mode = (request.query_params.get("mode") or "keyword").strip()
         facets = _read_facets(request)
-        ctx = await _search_context(session, q, facets, mode)
+        sources = _read_sources(request)
+        ctx = await _search_context(session, q, facets, mode, sources)
         ctx.update(request=request, user=_user_dict(user), active_nav="/")
         return templates.TemplateResponse(request, "home.html", ctx)
 
@@ -189,7 +227,8 @@ async def ui_search(request: Request):
         q = (request.query_params.get("q") or "").strip()
         mode = (request.query_params.get("mode") or "keyword").strip()
         facets = _read_facets(request)
-        ctx = await _search_context(session, q, facets, mode)
+        sources = _read_sources(request)
+        ctx = await _search_context(session, q, facets, mode, sources)
         ctx.update(request=request)
         return templates.TemplateResponse(request, "_search_response.html", ctx)
 
@@ -233,6 +272,7 @@ async def chat_page(request: Request):
                 "user": _user_dict(user),
                 "active_nav": "/chat",
                 "series_options": series,
+                "has_confluence": await _has_confluence(session),
             },
         )
 
@@ -250,8 +290,13 @@ async def ui_chat(request: Request):
         if not question:
             return HTMLResponse("", status_code=204)
         series_id = (form.get("seriesId") or "").strip() or None
+        sources = [
+            v.strip().lower()
+            for v in form.getlist("source")
+            if v and v.strip().lower() in _SOURCE_FIELDS
+        ] or None
         result = await main.ask_question(
-            main.AskBody(question=question, seriesId=series_id),
+            main.AskBody(question=question, seriesId=series_id, sources=sources),
             session=session,
         )
         return templates.TemplateResponse(
@@ -480,6 +525,59 @@ async def ui_admin_files(request: Request):
             return err
         files = await _drive_files(session)
         return _files_partial(request, files, await any_running())
+
+
+@web_router.get("/ui/admin/confluence", response_class=HTMLResponse)
+async def ui_admin_confluence(request: Request):
+    import config
+
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+    spaces: list[dict] = []
+    error = None
+    enabled = config.confluence_enabled()
+    if enabled:
+        import confluence
+
+        try:
+            spaces = [
+                {"id": s.id, "key": s.key, "name": s.name}
+                for s in await confluence.list_spaces()
+            ]
+        except Exception as exc:  # noqa: BLE001
+            error = f"Confluence への接続に失敗しました: {exc}"
+    return templates.TemplateResponse(
+        request,
+        "_admin_confluence.html",
+        {
+            "request": request,
+            "confluence_enabled": enabled,
+            "spaces": spaces,
+            "error": error,
+        },
+    )
+
+
+@web_router.post("/ui/admin/confluence/run", response_class=HTMLResponse)
+async def ui_admin_confluence_run(request: Request):
+    import config
+
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        form = await request.form()
+        space_id = (form.get("space_id") or "").strip()
+        if config.confluence_enabled() and space_id:
+            from ingest import schedule_confluence_ingest
+
+            await schedule_confluence_ingest(
+                space_id, actor_label=(user.display_name or user.email)
+            )
+        files = await _drive_files(session)
+        return await _status_partial(request, len(files))
 
 
 @web_router.post("/ui/admin/run", response_class=HTMLResponse)
@@ -1078,6 +1176,65 @@ async def admin_logs_page(request: Request):
                 "logs": logs,
             },
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# User guide (/guide) + admin editor (/admin/guide)
+# ─────────────────────────────────────────────────────────────────────
+
+
+@web_router.get("/guide", response_class=HTMLResponse)
+async def guide_page(request: Request):
+    from guide import get_guide_markdown, render_markdown
+
+    async with SessionLocal() as session:
+        user = await _current_user_optional(request, session)
+        if user is None:
+            return _login_redirect(request)
+        md = await get_guide_markdown(session)
+        return templates.TemplateResponse(
+            request,
+            "guide.html",
+            {
+                "request": request,
+                "user": _user_dict(user),
+                "active_nav": "/guide",
+                "guide_html": render_markdown(md),
+            },
+        )
+
+
+@web_router.get("/admin/guide", response_class=HTMLResponse)
+async def admin_guide_page(request: Request):
+    from guide import get_guide_markdown
+
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        md = await get_guide_markdown(session)
+        return templates.TemplateResponse(
+            request,
+            "admin_guide.html",
+            {
+                "request": request,
+                "user": _user_dict(user),
+                "active_nav": "/admin/guide",
+                "guide_markdown": md,
+            },
+        )
+
+
+@web_router.post("/admin/guide", response_class=HTMLResponse)
+async def admin_guide_save(request: Request, content: str = Form("")):
+    from guide import set_guide_markdown
+
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        await set_guide_markdown(session, content)
+    return RedirectResponse("/guide", status_code=303)
 
 
 # ─────────────────────────────────────────────────────────────────────
