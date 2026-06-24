@@ -22,15 +22,20 @@
   <form id="chat-form" class="chat-composer" hx-post="/ui/chat" hx-target="#chat-thread"
         hx-swap="beforeend" hx-disabled-elt="find button">
     {% if series_options %}
-    <label class="chat-series row gap-2 text-sm">
-      <span class="text-muted">定例シリーズ</span>
-      <select class="input" name="seriesId">
-        <option value="">自動判定</option>
-        {% for s in series_options %}
-        <option value="{{ s.id }}">{{ s.name }}</option>
-        {% endfor %}
-      </select>
-    </label>
+    <div class="chat-series-field">
+      <label class="chat-series row gap-2 text-sm">
+        <span class="text-muted">定例シリーズ</span>
+        <select class="input" name="seriesId">
+          <option value="">自動判定</option>
+          {% for s in series_options %}
+          <option value="{{ s.id }}">{{ s.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <p class="chat-series-hint">
+        {{ m.icon("calendar") }}<span>定例会議など<strong>定期的に更新される資料</strong>を一つの「シリーズ」としてまとめ、<strong>直近の開催回の流れ</strong>を踏まえて回答します（例：「前回からの変化」「最近の進捗」）。通常は<strong>自動判定</strong>のままでOK。特定のシリーズに絞りたいときだけ選んでください。</span>
+      </p>
+    </div>
     {% endif %}
     {% if has_confluence %}
     <div class="source-toggle" role="group" aria-label="検索対象">

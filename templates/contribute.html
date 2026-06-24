@@ -12,9 +12,13 @@
     <div class="card-header"><div class="text-base font-semibold">共有リンクを追加</div></div>
     <div class="card-body">
       <form hx-post="/ui/admin/add" hx-target="#admin-conflicts" hx-swap="innerHTML" class="space-y-sm"
+        hx-disabled-elt="find button[type='submit']"
         hx-on::after-request="if(event.detail.successful) this.reset()">
         <textarea class="textarea mono" name="text" rows="5" placeholder="https://drive.google.com/file/d/XXXXXXXX/view&#10;https://drive.google.com/open?id=YYYYYYYY&#10;ZZZZZZZZ（ファイルIDのみでも可）"></textarea>
-        <div class="row" style="justify-content:flex-end"><button type="submit" class="btn">{{ m.icon("plus") }}リンクを登録</button></div>
+        <div class="row between" style="align-items:center">
+          <div class="add-progress row gap-2 text-sm text-muted"><span class="spinner"></span>追加処理中です。フォルダ内のファイル数によっては時間がかかります…</div>
+          <button type="submit" class="btn">{{ m.icon("plus") }}リンクを登録</button>
+        </div>
       </form>
     </div>
   </div>
