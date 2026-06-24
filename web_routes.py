@@ -63,6 +63,12 @@ web_router = APIRouter(dependencies=[Depends(verify_csrf)])
 PAGE_SIZE = 50
 SEARCH_LIMIT = 60
 
+# Shown when a new ingest job is refused because the parallel-job cap is hit.
+_JOBS_FULL_MESSAGE = (
+    "実行中の取り込みジョブが上限（6件）に達しています。"
+    "完了を待ってから再試行してください。"
+)
+
 # Facet fields surfaced on the public search screen (layoutType is
 # intentionally omitted to mirror the original React home page).
 _FACET_FIELDS = ("industry", "client", "proposalType", "graphType", "docCategory", "tag")
@@ -917,13 +923,17 @@ async def ui_admin_retry(request: Request, drive_file_id: int):
         flash = None
         flash_error = False
         try:
-            await retry_drive_file(
+            result = await retry_drive_file(
                 drive_file_id,
                 RetryBody(force=True),
                 session=session,
                 actor_label=(user.display_name or user.email),
             )
-            flash = "再取り込みを開始しました"
+            if result.get("started"):
+                flash = "再取り込みを開始しました"
+            else:
+                flash = _JOBS_FULL_MESSAGE
+                flash_error = True
         except HTTPException as exc:
             flash = exc.detail
             flash_error = True
@@ -952,10 +962,14 @@ async def ui_admin_regen_thumbnails(request: Request, drive_file_id: int):
         flash = None
         flash_error = False
         try:
-            await regen_thumbnails(
+            result = await regen_thumbnails(
                 drive_file_id, session=session, actor=user
             )
-            flash = "サムネイル再生成を開始しました"
+            if result.get("started"):
+                flash = "サムネイル再生成を開始しました"
+            else:
+                flash = _JOBS_FULL_MESSAGE
+                flash_error = True
         except HTTPException as exc:
             flash = exc.detail
             flash_error = True

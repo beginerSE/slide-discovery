@@ -410,6 +410,29 @@ def _parse_ingested_files(raw: str | None) -> list[dict]:
     return out
 
 
+def _parse_failed_files(raw: str | None) -> list[dict]:
+    """Parse the stored per-file FAILURE records for the admin job history.
+
+    Each line is ``name\\terror\\tISO8601`` (written by
+    ``ingest.JobTracker.file_failed``). Legacy rows written before this format
+    (a bare error message with no tabs) still yield a usable ``error`` so the
+    template never breaks.
+    """
+    out: list[dict] = []
+    for line in (raw or "").splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            name, error, at = parts[0], parts[1], (parts[2].strip() or None)
+        elif len(parts) == 2:
+            name, error, at = parts[0], parts[1], None
+        else:
+            name, error, at = None, parts[0], None
+        out.append({"name": name, "error": error, "at": at})
+    return out
+
+
 class IngestJob(Base):
     """A single ingest run, persisted so progress survives across processes.
 
@@ -441,6 +464,10 @@ class IngestJob(Base):
     # files a job processed even after it completes (when current_file is
     # cleared).
     ingested_files: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Newline-joined per-file FAILURE records (``name\terror\tISO8601``),
+    # accumulated as each file fails. Lets the admin job history show which
+    # files failed and why, not just a count.
+    failed_files: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow, index=True
     )
@@ -476,6 +503,7 @@ class IngestJob(Base):
             "currentFileTotal": self.current_file_total,
             "message": self.message,
             "ingestedFiles": _parse_ingested_files(self.ingested_files),
+            "failedFiles": _parse_failed_files(self.failed_files),
             "startedAt": iso(self.started_at),
             "updatedAt": iso(self.updated_at),
             "finishedAt": iso(self.finished_at),
@@ -522,132 +550,138 @@ SEARCH_EXPR = (
 
 async def init_db() -> None:
     async with engine.begin() as conn:
+        # Fail fast instead of deadlocking: every DDL below would otherwise wait
+        # indefinitely for its lock, and a rolling Cloud Run deploy boots a new
+        # revision that runs init_db() while the old revision is still mid
+        # re-ingest. Two transactions each holding a table lock the other needs
+        # (slides + drive_files) deadlock, and Postgres aborts the ingest.
+        await conn.execute(text("SET LOCAL lock_timeout = '10s'"))
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(Base.metadata.create_all)
 
-        # Idempotent column add for pre-existing databases.
-        await conn.execute(
+        # Snapshot the catalog ONCE (these reads take only AccessShareLock), so
+        # an already-migrated DB issues ZERO locking DDL on boot: each ALTER /
+        # CREATE / DROP below is skipped when its target already exists. This is
+        # what stops init_db from taking AccessExclusiveLock on slides /
+        # drive_files and deadlocking a concurrent ingest during a deploy.
+        async def _columns(table: str) -> set[str]:
+            rows = await conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name = :t"
+                ),
+                {"t": table},
+            )
+            return {r[0] for r in rows}
+
+        idx_rows = await conn.execute(
             text(
-                f"ALTER TABLE slides ADD COLUMN IF NOT EXISTS embedding vector({EMBED_DIM})"
+                "SELECT indexname FROM pg_indexes "
+                "WHERE schemaname = current_schema()"
             )
         )
-        await conn.execute(
-            text(
-                "ALTER TABLE slides ADD COLUMN IF NOT EXISTS client "
-                "varchar NOT NULL DEFAULT ''"
-            )
+        idx = {r[0] for r in idx_rows}
+        cols = {
+            t: await _columns(t)
+            for t in ("slides", "drive_files", "users", "ingest_jobs")
+        }
+
+        async def add_column(table: str, name: str, ddl_type: str) -> None:
+            if name not in cols[table]:
+                await conn.execute(
+                    text(
+                        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
+                        f"{name} {ddl_type}"
+                    )
+                )
+
+        async def create_index(name: str, ddl: str) -> None:
+            if name not in idx:
+                await conn.execute(text(ddl))
+
+        # Idempotent column adds for pre-existing databases.
+        await add_column("slides", "embedding", f"vector({EMBED_DIM})")
+        await add_column("slides", "client", "varchar NOT NULL DEFAULT ''")
+        await add_column(
+            "slides", "source_type", "varchar NOT NULL DEFAULT 'pptx'"
         )
-        await conn.execute(
-            text(
-                "ALTER TABLE slides ADD COLUMN IF NOT EXISTS source_type "
-                "varchar NOT NULL DEFAULT 'pptx'"
-            )
+        await add_column(
+            "slides", "doc_category", "varchar NOT NULL DEFAULT ''"
         )
-        await conn.execute(
-            text(
-                "ALTER TABLE slides ADD COLUMN IF NOT EXISTS doc_category "
-                "varchar NOT NULL DEFAULT ''"
-            )
+        await add_column(
+            "slides", "source_space_id", "varchar NOT NULL DEFAULT ''"
         )
-        await conn.execute(
-            text(
-                "ALTER TABLE slides ADD COLUMN IF NOT EXISTS source_space_id "
-                "varchar NOT NULL DEFAULT ''"
-            )
-        )
-        await conn.execute(
-            text(
-                "ALTER TABLE drive_files ADD COLUMN IF NOT EXISTS display_name "
-                "varchar NOT NULL DEFAULT ''"
-            )
+        await add_column(
+            "drive_files", "display_name", "varchar NOT NULL DEFAULT ''"
         )
         # Recurring-meeting ("定例") series columns (folder grouping + date).
         for tbl in ("slides", "drive_files"):
-            await conn.execute(
-                text(
-                    f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS folder_id "
-                    "varchar NOT NULL DEFAULT ''"
-                )
-            )
-            await conn.execute(
-                text(
-                    f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS folder_name "
-                    "varchar NOT NULL DEFAULT ''"
-                )
-            )
-            await conn.execute(
-                text(
-                    f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS doc_date date"
-                )
-            )
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS slides_folder_id_idx "
-                "ON slides (folder_id)"
-            )
+            await add_column(tbl, "folder_id", "varchar NOT NULL DEFAULT ''")
+            await add_column(tbl, "folder_name", "varchar NOT NULL DEFAULT ''")
+            await add_column(tbl, "doc_date", "date")
+        await create_index(
+            "slides_folder_id_idx",
+            "CREATE INDEX IF NOT EXISTS slides_folder_id_idx "
+            "ON slides (folder_id)",
         )
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS slides_doc_date_idx "
-                "ON slides (doc_date)"
-            )
+        await create_index(
+            "slides_doc_date_idx",
+            "CREATE INDEX IF NOT EXISTS slides_doc_date_idx "
+            "ON slides (doc_date)",
         )
-        await conn.execute(
-            text(
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS can_upload "
-                "boolean NOT NULL DEFAULT false"
-            )
+        await add_column(
+            "users", "can_upload", "boolean NOT NULL DEFAULT false"
         )
         # Resume support: per-slide content fingerprint + job heartbeat.
-        await conn.execute(
-            text(
-                "ALTER TABLE slides ADD COLUMN IF NOT EXISTS "
-                "source_fingerprint varchar"
-            )
+        await add_column("slides", "source_fingerprint", "varchar")
+        await add_column(
+            "ingest_jobs", "updated_at", "timestamptz NOT NULL DEFAULT now()"
         )
-        await conn.execute(
-            text(
-                "ALTER TABLE ingest_jobs ADD COLUMN IF NOT EXISTS updated_at "
-                "timestamptz NOT NULL DEFAULT now()"
-            )
+        await add_column("ingest_jobs", "ingested_files", "text")
+        # Per-file failures recorded during a run (name + error), so the admin
+        # UI can show WHICH files failed and why — not just a failure count.
+        await add_column("ingest_jobs", "failed_files", "text")
+        await create_index(
+            "add_logs_created_at_idx",
+            "CREATE INDEX IF NOT EXISTS add_logs_created_at_idx "
+            "ON add_logs (created_at DESC)",
         )
-        await conn.execute(
-            text(
-                "ALTER TABLE ingest_jobs ADD COLUMN IF NOT EXISTS "
-                "ingested_files text"
-            )
-        )
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS add_logs_created_at_idx "
-                "ON add_logs (created_at DESC)"
-            )
-        )
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS ingest_jobs_started_at_idx "
-                "ON ingest_jobs (started_at DESC)"
-            )
+        await create_index(
+            "ingest_jobs_started_at_idx",
+            "CREATE INDEX IF NOT EXISTS ingest_jobs_started_at_idx "
+            "ON ingest_jobs (started_at DESC)",
         )
 
         # Ensure tags is jsonb (older DBs may have been created with json).
-        await conn.execute(
-            text(
-                "ALTER TABLE slides ALTER COLUMN tags TYPE jsonb "
-                "USING tags::jsonb"
+        # ALTER COLUMN ... TYPE always takes AccessExclusiveLock (and may rewrite
+        # the table), so only run it when the type is not already jsonb.
+        tags_type = (
+            await conn.execute(
+                text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() "
+                    "AND table_name = 'slides' AND column_name = 'tags'"
+                )
             )
-        )
+        ).scalar_one_or_none()
+        if tags_type and tags_type != "jsonb":
+            await conn.execute(
+                text(
+                    "ALTER TABLE slides ALTER COLUMN tags TYPE jsonb "
+                    "USING tags::jsonb"
+                )
+            )
         # Full-text search index over title + body + summary.
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS slides_fts_idx ON slides "
-                f"USING GIN ({FTS_EXPR})"
-            )
+        await create_index(
+            "slides_fts_idx",
+            "CREATE INDEX IF NOT EXISTS slides_fts_idx ON slides "
+            f"USING GIN ({FTS_EXPR})",
         )
-        # Drop the legacy trigram index (pre-tags era). Cheap no-op once
-        # gone.
-        await conn.execute(text("DROP INDEX IF EXISTS slides_trgm_idx"))
+        # Drop the legacy trigram index (pre-tags era). Only DROP when it still
+        # exists — DROP INDEX takes AccessExclusiveLock, so skip it otherwise.
+        if "slides_trgm_idx" in idx:
+            await conn.execute(text("DROP INDEX IF EXISTS slides_trgm_idx"))
         # Trigram index for substring matching (handles CJK without word
         # boundaries, which to_tsvector('simple') cannot tokenize well).
         # Includes tags::text and facet columns so their substrings are
@@ -683,25 +717,22 @@ async def init_db() -> None:
                 )
             )
         # jsonb_path_ops GIN index for tag containment queries.
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS slides_tags_gin_idx ON slides "
-                "USING GIN (tags jsonb_path_ops)"
-            )
+        await create_index(
+            "slides_tags_gin_idx",
+            "CREATE INDEX IF NOT EXISTS slides_tags_gin_idx ON slides "
+            "USING GIN (tags jsonb_path_ops)",
         )
         # Facet columns get a plain btree for equality filters + sort.
         for col in ("industry", "proposal_type", "graph_type", "layout_type", "doc_category"):
-            await conn.execute(
-                text(
-                    f"CREATE INDEX IF NOT EXISTS slides_{col}_idx "
-                    f"ON slides ({col})"
-                )
+            await create_index(
+                f"slides_{col}_idx",
+                f"CREATE INDEX IF NOT EXISTS slides_{col}_idx "
+                f"ON slides ({col})",
             )
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS slides_created_at_idx "
-                "ON slides (created_at DESC)"
-            )
+        await create_index(
+            "slides_created_at_idx",
+            "CREATE INDEX IF NOT EXISTS slides_created_at_idx "
+            "ON slides (created_at DESC)",
         )
 
 

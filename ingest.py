@@ -36,6 +36,12 @@ _ACTIVE_LOCK = asyncio.Lock()
 # and the job-row reservation happen atomically (within this process).
 _SCHEDULE_LOCK = asyncio.Lock()
 
+# Hard cap on how many ingest jobs (any kind) may run in parallel. Stacking
+# kinds (retry / thumbs) would otherwise be unbounded; this keeps the warm
+# single instance from being overwhelmed. Enforced under ``_SCHEDULE_LOCK`` by
+# every scheduler before it reserves a job row.
+MAX_CONCURRENT_JOBS = 6
+
 # Background ingest tasks by job_id, so manual cleanup / stalled-job reaping can
 # cooperatively cancel the in-flight task (not just flip its DB row). Only holds
 # tasks started by THIS process; an orphaned job from a dead process has no
@@ -79,6 +85,7 @@ class JobTracker:
         self.processed = 0
         self.failed = 0
         self.files: list[str] = []
+        self.failures: list[str] = []
         self._last_page_flush = 0.0
 
     def _abort_if_not_running(self, job: IngestJob | None) -> None:
@@ -159,10 +166,20 @@ class JobTracker:
             current_file_total=None,
         )
 
-    async def file_failed(self, message: str) -> None:
+    async def file_failed(self, message: str, name: str | None = None) -> None:
         self.failed += 1
+        if name:
+            # One record per line: ``name\terror\tISO8601`` (same shape as
+            # file_done), so the admin history can show WHICH file failed and
+            # why. Flatten tabs/newlines so the parsing stays intact.
+            def _flat(s: str) -> str:
+                return s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+
+            at = utcnow().isoformat().replace("+00:00", "Z")
+            self.failures.append(f"{_flat(name)}\t{_flat(message)[:300]}\t{at}")
         await self._patch(
             failed=self.failed,
+            failed_files="\n".join(self.failures),
             message=message[:500],
             current_file=None,
             stage=None,
@@ -908,7 +925,10 @@ async def run_ingest(
                     _ACTIVE_FILES.discard(row.drive_file_id)
                 raise
             except Exception as e:  # noqa: BLE001
-                await tracker.file_failed(f"{row.drive_file_id}: {e}")
+                await tracker.file_failed(
+                    str(e),
+                    name=row.display_name or row.file_name or row.drive_file_id,
+                )
             finally:
                 async with _ACTIVE_LOCK:
                     _ACTIVE_FILES.discard(row.drive_file_id)
@@ -1082,6 +1102,8 @@ async def schedule_ingest_background(
         await reap_stalled_jobs()
         if kind in ("manual", "sync") and await _count_running(kind) > 0:
             return False
+        if await _count_running() >= MAX_CONCURRENT_JOBS:
+            return False
         job_id = await _create_job(kind, actor_label)
     task = asyncio.create_task(
         run_ingest(
@@ -1231,7 +1253,10 @@ async def run_thumbnail_regen(
             raise
         except Exception as e:  # noqa: BLE001
             log.exception("thumbnail regen failed for %s", row.drive_file_id)
-            await tracker.file_failed(f"{row.drive_file_id}: {e}")
+            await tracker.file_failed(
+                str(e),
+                name=row.display_name or row.file_name or row.drive_file_id,
+            )
             await tracker.finish("failed", message=str(e))
         finally:
             async with _ACTIVE_LOCK:
@@ -1254,6 +1279,8 @@ async def schedule_thumbnail_regen_background(
     same-file collision."""
     async with _SCHEDULE_LOCK:
         await reap_stalled_jobs()
+        if await _count_running() >= MAX_CONCURRENT_JOBS:
+            return False
         job_id = await _create_job("thumbs", actor_label)
     task = asyncio.create_task(
         run_thumbnail_regen(drive_file_id, actor_label=actor_label, job_id=job_id)
@@ -1498,7 +1525,7 @@ async def run_confluence_ingest(
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                await tracker.file_failed(f"{page.id}: {e}")
+                await tracker.file_failed(str(e), name=page.title or page.id)
         # Prune pages deleted from this space since the last ingest. Scoped to
         # source_space_id so other spaces' rows are never touched.
         await tracker.set_stage("削除ページの整理中")
@@ -1548,6 +1575,8 @@ async def schedule_confluence_ingest(
     async with _SCHEDULE_LOCK:
         await reap_stalled_jobs()
         if await _count_running("confluence") > 0:
+            return False
+        if await _count_running() >= MAX_CONCURRENT_JOBS:
             return False
         job_id = await _create_job("confluence", actor_label)
     task = asyncio.create_task(

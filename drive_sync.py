@@ -189,9 +189,17 @@ async def sync_drive_changes() -> dict:
 
     unique_ids = sorted(set(reingest_ids))
     if unique_ids:
-        await schedule_ingest_background(
+        started = await schedule_ingest_background(
             only_ids=unique_ids, force=False, kind="sync", actor_label="自動同期"
         )
+        if not started:
+            # Refused: another sync is already running, or the parallel-job cap
+            # is hit. These ids will be re-detected and retried on the next tick.
+            log.warning(
+                "drive sync reingest deferred (%d file(s)); a sync job is "
+                "already running or the parallel-job cap is reached",
+                len(unique_ids),
+            )
 
     return {
         "ran": True,

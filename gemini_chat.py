@@ -99,6 +99,57 @@ def build_chat_prompt(
     )
 
 
+def _count_dated(series: list[dict] | None) -> int:
+    """Number of files in the series that carry a parsed meeting date — the
+    hierarchy signal that this folder is a genuine recurring ('定例') series."""
+    return sum(1 for f in (series or []) if f.get("docDate"))
+
+
+async def should_use_series(
+    question: str,
+    series_name: str,
+    series: list[dict] | None,
+) -> bool:
+    """Decide whether the recurring-meeting timeline is worth feeding into the
+    answer for THIS question — judged from the file hierarchy plus an AI
+    relevance check.
+
+    The hierarchy gate runs first with NO network call: a real 定例 series
+    needs at least two dated files (a single "直近1回分" is not a flow worth
+    referencing). Only then do we ask Gemini whether the question is actually
+    about the series' progression (経緯・変化・進捗) rather than a one-off
+    "this topic" lookup. On any AI error we keep the (already dated, multi-file)
+    series so behavior degrades to the hierarchy signal alone.
+    """
+    if _count_dated(series) < 2:
+        return False
+    listing = "\n".join(
+        f"- {f.get('docDate') or '日付不明'} {f.get('fileName') or '（不明）'}"
+        for f in (series or [])
+    )
+    prompt = (
+        "あなたは社内資料検索アシスタントの補助判定器です。\n"
+        "下記は、同じフォルダ階層にある定期更新資料（定例シリーズの候補）の"
+        "一覧です。\n"
+        f"フォルダ名: {series_name or '（不明）'}\n"
+        f"資料一覧（新しい順）:\n{listing}\n\n"
+        f"ユーザーの質問: {question}\n\n"
+        "この質問に答える際、上記シリーズの『時系列の流れ』"
+        "（前回からの変化・最近の進捗・これまでの経緯・直近の状況）を"
+        "踏まえることが有用ですか？\n"
+        "・特定テーマの資料を一覧的に探すだけの質問なら不要。\n"
+        "・経緯・変化・進捗・直近の状況などを問う質問なら有用。\n"
+        "必ず『はい』または『いいえ』の一語だけで答えてください。"
+    )
+    try:
+        out = (await _generate_once(prompt)).strip()
+    except Exception as e:  # noqa: BLE001
+        log.warning("series relevance judge failed; keeping series: %s", e)
+        return True
+    head = out.lstrip("　 \"'「『").lower()
+    return head.startswith("はい") or head.startswith(("yes", "true"))
+
+
 async def _generate_once_vertex(prompt: str) -> str:
     from google.genai import types
 

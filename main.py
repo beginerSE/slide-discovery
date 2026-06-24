@@ -451,12 +451,13 @@ async def ask_question(
             "degraded": False,
         }
 
-    from gemini_chat import generate_answer
+    from gemini_chat import generate_answer, should_use_series
     from series import recent_series_context
 
     # Detect the 定例シリーズ (recurring-meeting series = Drive folder): use an
     # explicit seriesId if given, else infer it from the top hit's folder.
     series_id = (body.seriesId or "").strip()
+    explicit_series = bool(series_id)
     if not series_id:
         series_id = (sources[0].get("folderId") or "").strip()
     series_context: list[dict] = []
@@ -485,6 +486,16 @@ async def ask_question(
                     )
                 ).scalar_one_or_none()
                 series_name = row or ""
+            # 自動判定 mode: let the AI judge — from the file hierarchy (the
+            # folder's dated files) plus the question — whether the series'
+            # time-series flow is actually relevant. An explicit user choice is
+            # always honored and skips the judge.
+            if not explicit_series and series_context:
+                keep = await should_use_series(
+                    question, series_name, series_context
+                )
+                if not keep:
+                    series_context = []
         except Exception as e:
             log.warning("ask: series context failed: %s", e)
 
