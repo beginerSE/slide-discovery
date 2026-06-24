@@ -8,6 +8,7 @@ updates (live search, ingest polling, inline saves).
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -530,6 +531,55 @@ async def ui_admin_files(request: Request):
         return _files_partial(request, files, await any_running())
 
 
+@web_router.post("/ui/admin/tree", response_class=HTMLResponse)
+async def ui_admin_tree(request: Request):
+    """Walk a pasted Drive folder link and show its full nested subfolder tree
+    annotated with each file's ingest status (取り込み済み / 未取り込み / 未登録…)."""
+    import drive
+    from sqlalchemy import select
+
+    from db import DriveFile
+    from folder_tree import build_tree
+
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        form = await request.form()
+        raw = (form.get("folder") or "").strip()
+        folder_id = drive.extract_folder_id(raw)
+        if not folder_id:
+            return templates.TemplateResponse(
+                request,
+                "_admin_tree.html",
+                {
+                    "request": request,
+                    "tree": None,
+                    "summary": None,
+                    "error": "フォルダの共有リンク（またはフォルダID）を入力してください。",
+                },
+            )
+        try:
+            data = await drive.list_folder_tree(folder_id)
+        except Exception as e:  # noqa: BLE001 — surface the walk error inline
+            return templates.TemplateResponse(
+                request,
+                "_admin_tree.html",
+                {"request": request, "tree": None, "summary": None, "error": str(e)},
+            )
+        rows = (await session.execute(select(DriveFile))).scalars().all()
+        status_by_id = {r.drive_file_id: r.to_dict() for r in rows}
+        root_name = data.get("rootName") or await drive.fetch_folder_name(folder_id)
+        tree, summary = build_tree(
+            data["rootId"], root_name, data["folders"], data["files"], status_by_id
+        )
+        return templates.TemplateResponse(
+            request,
+            "_admin_tree.html",
+            {"request": request, "tree": tree, "summary": summary, "error": None},
+        )
+
+
 @web_router.get("/ui/admin/confluence", response_class=HTMLResponse)
 async def ui_admin_confluence(request: Request):
     import config
@@ -613,7 +663,7 @@ async def ui_admin_cleanup_job(request: Request, job_id: int):
 
 
 def _conflicts_partial(
-    request: Request, conflicts: list[dict], flash=None, flash_error=False
+    request: Request, conflicts: list[dict], flash=None, flash_error=False, toast=None
 ):
     resp = templates.TemplateResponse(
         request,
@@ -625,8 +675,14 @@ def _conflicts_partial(
             "flash_error": flash_error,
         },
     )
-    # Tell the (non-polling) conflict region's sibling file list to refresh now.
-    resp.headers["HX-Trigger"] = "refreshAdminFiles"
+    # Tell the (non-polling) conflict region's sibling file list to refresh now,
+    # and (optionally) raise a client-side toast popup with the add summary.
+    trigger: dict = {"refreshAdminFiles": True}
+    if toast:
+        trigger["showToast"] = toast
+    # HTTP headers are latin-1; keep the (Japanese) toast message ASCII-safe by
+    # \uXXXX-escaping it (ensure_ascii=True). The browser/htmx decodes the JSON.
+    resp.headers["HX-Trigger"] = json.dumps(trigger)
     return resp
 
 
@@ -643,7 +699,13 @@ async def ui_admin_add(request: Request):
         try:
             entries, folder_errors = await resolve_input_entries(text, session)
         except HTTPException as exc:
-            return _conflicts_partial(request, [], flash=exc.detail, flash_error=True)
+            return _conflicts_partial(
+                request,
+                [],
+                flash=exc.detail,
+                flash_error=True,
+                toast={"message": exc.detail, "type": "error"},
+            )
 
         existing_rows = (
             await session.execute(select(DriveFile))
@@ -708,7 +770,23 @@ async def ui_admin_add(request: Request):
             flash = (flash + " / " + ferr) if flash else ferr
         if not flash and not conflicts:
             flash = "登録できるファイルがありませんでした"
-        return _conflicts_partial(request, conflicts, flash=flash)
+
+        # Build the toast popup summary in the requested format
+        # （例: 新規 N 件追加、既存 N 件、要確認 N 件）.
+        toast_parts = []
+        if registered:
+            toast_parts.append(f"新規 {registered} 件追加")
+        if skipped:
+            toast_parts.append(f"既存 {skipped} 件")
+        if conflicts:
+            toast_parts.append(f"要確認 {len(conflicts)} 件")
+        if toast_parts:
+            toast = {"message": "、".join(toast_parts), "type": "success"}
+        elif folder_errors:
+            toast = {"message": " ; ".join(folder_errors), "type": "error"}
+        else:
+            toast = {"message": "登録できるファイルがありませんでした", "type": "error"}
+        return _conflicts_partial(request, conflicts, flash=flash, toast=toast)
 
 
 @web_router.post("/ui/admin/add/resolve", response_class=HTMLResponse)
@@ -820,7 +898,11 @@ async def ui_admin_add_resolve(request: Request):
         if skipped:
             parts.append(f"スキップ {skipped} 件")
         flash = ("、".join(parts) + " を適用しました") if parts else "適用する項目がありませんでした"
-        return _conflicts_partial(request, [], flash=flash)
+        toast = {
+            "message": flash,
+            "type": "success" if parts else "error",
+        }
+        return _conflicts_partial(request, [], flash=flash, toast=toast)
 
 
 @web_router.post("/ui/admin/files/{drive_file_id}/retry", response_class=HTMLResponse)

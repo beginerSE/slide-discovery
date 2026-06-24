@@ -120,19 +120,20 @@ def _unescape_html(s: str) -> str:
     return _html.unescape(s).strip()
 
 
-def _parse_public_folder_html(html: str) -> tuple[list[tuple[str, str]], list[str]]:
-    """Parse an 'embeddedfolderview' page into (pptx_files, subfolder_ids).
+def _parse_public_folder_entries(
+    html: str,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Parse an 'embeddedfolderview' page into (pptx_files, subfolders).
 
-    ``pptx_files`` is a list of ``(file_id, file_name)`` for .ppt/.pptx
-    entries; ``subfolder_ids`` is the list of child folder ids. A flip-entry
-    is recognised as a folder when it links to ``/drive/folders/<id>`` or
-    renders the Drive folder sprite icon (``drive-sprite-folder-*``). The
-    legacy ``application/vnd.google-apps.folder`` mime is also accepted as a
-    fallback, but current Drive HTML no longer emits it.
+    Both lists carry ``(id, name)`` — ``name`` is the entry's display title
+    (the folder name for subfolders, the file name for files). A flip-entry is
+    recognised as a folder when it links to ``/drive/folders/<id>`` or renders
+    the Drive folder sprite icon (``drive-sprite-folder-*``); the legacy
+    ``application/vnd.google-apps.folder`` mime is accepted as a fallback.
     """
     chunks = _FOLDER_ENTRY_SPLIT_RE.split(html)[1:]
     files: list[tuple[str, str]] = []
-    folders: list[str] = []
+    folders: list[tuple[str, str]] = []
     seen_files: set[str] = set()
     seen_folders: set[str] = set()
     for chunk in chunks:
@@ -140,17 +141,17 @@ def _parse_public_folder_html(html: str) -> tuple[list[tuple[str, str]], list[st
         if not id_m:
             continue
         eid = id_m.group(1)
+        title_m = _ENTRY_TITLE_RE.search(chunk)
+        name = _unescape_html(title_m.group(1)) if title_m else ""
         folder_m = _FOLDER_HREF_RE.search(chunk)
         if folder_m or _FOLDER_SPRITE_RE.search(chunk) or _FOLDER_MIME in chunk:
             sub = folder_m.group(1) if folder_m else eid
             if sub not in seen_folders:
                 seen_folders.add(sub)
-                folders.append(sub)
+                folders.append((sub, name))
             continue
-        title_m = _ENTRY_TITLE_RE.search(chunk)
         if not title_m:
             continue
-        name = _unescape_html(title_m.group(1))
         if eid in seen_files:
             continue
         if not _PPTX_EXT_RE.search(name):
@@ -160,17 +161,31 @@ def _parse_public_folder_html(html: str) -> tuple[list[tuple[str, str]], list[st
     return files, folders
 
 
-async def _list_folder_files_public(folder_id: str) -> list[tuple[str, str, str]]:
-    """List .ppt/.pptx files under a public Drive folder, recursing subfolders.
+def _parse_public_folder_html(html: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Backward-compatible wrapper around :func:`_parse_public_folder_entries`.
 
-    Returns ``(file_id, file_name, parent_folder_id)`` where ``parent_folder_id``
-    is the immediate folder the file was found in (so a recurring-meeting series
-    keys off the nearest subfolder, not the top folder). Uses the public
-    'embeddedfolderview' page (no auth). Raises RuntimeError only if the *top*
-    folder isn't publicly accessible; unreadable subfolders are skipped.
+    Returns ``(pptx_files, subfolder_ids)`` (folder names dropped). Kept for the
+    flat folder listing and its unit tests; new callers that need folder names
+    should use :func:`_parse_public_folder_entries`.
     """
-    out: list[tuple[str, str, str]] = []
+    files, folders = _parse_public_folder_entries(html)
+    return files, [fid for fid, _ in folders]
+
+
+async def _list_folder_tree_public(folder_id: str) -> dict:
+    """Walk a public Drive folder, returning its full subfolder tree.
+
+    Returns ``{"rootId", "rootName", "folders", "files"}`` where ``folders`` is
+    ``[{"id","name","parentId"}]`` (subfolders only, named from their parent's
+    listing) and ``files`` is ``[{"fileId","name","parentId"}]``. The public
+    'embeddedfolderview' page does not expose the root folder's own name, so
+    ``rootName`` is "" (the caller labels it). Same error semantics as the flat
+    lister: only the *top* folder being unreadable raises; subfolders skip.
+    """
+    folders_out: list[dict] = []
+    files_out: list[dict] = []
     seen_files: set[str] = set()
+    seen_folders: set[str] = set()
     visited: set[str] = set()
     stack: list[str] = [folder_id]
     timeout = httpx.Timeout(30.0, read=60.0)
@@ -210,16 +225,36 @@ async def _list_folder_files_public(folder_id: str) -> list[tuple[str, str, str]
                     )
                 log.warning("subfolder unreadable, skipping id=%s", current)
                 continue
-            files, subfolders = _parse_public_folder_html(html)
+            files, subfolders = _parse_public_folder_entries(html)
             for fid, name in files:
                 if fid in seen_files:
                     continue
                 seen_files.add(fid)
-                out.append((fid, name, current))
-            for sub in subfolders:
+                files_out.append({"fileId": fid, "name": name, "parentId": current})
+            for sub, sname in subfolders:
+                if sub not in seen_folders:
+                    seen_folders.add(sub)
+                    folders_out.append(
+                        {"id": sub, "name": sname, "parentId": current}
+                    )
                 if sub not in visited:
                     stack.append(sub)
-    return out
+    return {
+        "rootId": folder_id,
+        "rootName": "",
+        "folders": folders_out,
+        "files": files_out,
+    }
+
+
+async def _list_folder_files_public(folder_id: str) -> list[tuple[str, str, str]]:
+    """List .ppt/.pptx files under a public Drive folder, recursing subfolders.
+
+    Returns ``(file_id, file_name, parent_folder_id)`` (immediate parent folder).
+    Thin flattening of :func:`_list_folder_tree_public`.
+    """
+    tree = await _list_folder_tree_public(folder_id)
+    return [(f["fileId"], f["name"], f["parentId"]) for f in tree["files"]]
 
 
 def view_url(file_id: str) -> str:
@@ -323,18 +358,30 @@ def is_pptx(name: str, mime: str) -> bool:
     return _is_pptx(name, mime)
 
 
-async def _list_folder_files_api(folder_id: str) -> list[tuple[str, str, str]]:
-    """List .ppt/.pptx files under a folder, recursing into subfolders.
+async def _list_folder_tree_api(folder_id: str) -> dict:
+    """Walk a folder via the Drive API, returning its full subfolder tree.
 
-    Returns ``(file_id, file_name, parent_folder_id)`` where
-    ``parent_folder_id`` is the immediate folder the file lives in.
+    Returns ``{"rootId", "rootName", "folders", "files"}`` (see
+    :func:`_list_folder_tree_public`). The root folder's own name is fetched via
+    a metadata call (best-effort, "" on failure).
     """
-    def _run() -> list[tuple[str, str, str]]:
+    def _run() -> dict:
         svc = _drive_service()
-        out: list[tuple[str, str, str]] = []
+        folders_out: list[dict] = []
+        files_out: list[dict] = []
         seen_files: set[str] = set()
+        seen_folders: set[str] = set()
         visited: set[str] = set()
         stack: list[str] = [folder_id]
+        try:
+            meta = (
+                svc.files()
+                .get(fileId=folder_id, fields="id, name", supportsAllDrives=True)
+                .execute()
+            )
+            root_name = meta.get("name", "")
+        except Exception:  # noqa: BLE001 — name is a best-effort label
+            root_name = ""
         while stack:
             current = stack.pop()
             if current in visited:
@@ -361,6 +408,11 @@ async def _list_folder_files_api(folder_id: str) -> list[tuple[str, str, str]]:
                     if not fid:
                         continue
                     if mime == _FOLDER_MIME:
+                        if fid not in seen_folders:
+                            seen_folders.add(fid)
+                            folders_out.append(
+                                {"id": fid, "name": name, "parentId": current}
+                            )
                         if fid not in visited:
                             stack.append(fid)
                         continue
@@ -369,11 +421,18 @@ async def _list_folder_files_api(folder_id: str) -> list[tuple[str, str, str]]:
                     if not _is_pptx(name, mime):
                         continue
                     seen_files.add(fid)
-                    out.append((fid, name, current))
+                    files_out.append(
+                        {"fileId": fid, "name": name, "parentId": current}
+                    )
                 page_token = resp.get("nextPageToken")
                 if not page_token:
                     break
-        return out
+        return {
+            "rootId": folder_id,
+            "rootName": root_name,
+            "folders": folders_out,
+            "files": files_out,
+        }
 
     try:
         return await asyncio.to_thread(_run)
@@ -381,6 +440,15 @@ async def _list_folder_files_api(folder_id: str) -> list[tuple[str, str, str]]:
         raise RuntimeError(
             f"Drive API でフォルダを取得できませんでした (id={folder_id}): {e}"
         ) from e
+
+
+async def _list_folder_files_api(folder_id: str) -> list[tuple[str, str, str]]:
+    """List .ppt/.pptx files under a folder via the Drive API (flat).
+
+    Thin flattening of :func:`_list_folder_tree_api`.
+    """
+    tree = await _list_folder_tree_api(folder_id)
+    return [(f["fileId"], f["name"], f["parentId"]) for f in tree["files"]]
 
 
 async def _download_api(file_id: str, out_dir: Path) -> DownloadResult:
@@ -438,6 +506,19 @@ async def list_folder_files(folder_id: str) -> list[tuple[str, str, str]]:
     if config.use_drive_api():
         return await _list_folder_files_api(folder_id)
     return await _list_folder_files_public(folder_id)
+
+
+async def list_folder_tree(folder_id: str) -> dict:
+    """Walk a Drive folder and return its full subfolder tree (not flattened).
+
+    Returns ``{"rootId", "rootName", "folders", "files"}`` — ``folders`` and
+    ``files`` each carry their immediate ``parentId`` so the caller can rebuild
+    the nesting (see :mod:`folder_tree`). Used by the admin "フォルダ構成の確認"
+    view to show which files in which subfolder are ingested vs not.
+    """
+    if config.use_drive_api():
+        return await _list_folder_tree_api(folder_id)
+    return await _list_folder_tree_public(folder_id)
 
 
 async def download(file_id: str, out_dir: Path) -> DownloadResult:

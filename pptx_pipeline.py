@@ -97,11 +97,22 @@ def render_thumbnails(pptx_path: Path, out_dir: Path, dpi: int = 110) -> list[Pa
     log.info("render start: PPTX->PDF %s (dpi=%d)", pptx_path.name, dpi)
     with tempfile.TemporaryDirectory(prefix="pptx_") as tmp:
         tmp_dir = Path(tmp)
+        # Give this conversion its OWN LibreOffice user profile. By default every
+        # `soffice` invocation shares ~/.config/libreoffice, which is locked while
+        # in use — so two conversions running at once make the second fail
+        # intermittently (often surfaced as the misleading "failed to launch
+        # javaldx / java may not function correctly" warning). An isolated,
+        # throwaway profile per run removes the lock contention. `-norestore`
+        # avoids reopening a crashed previous session's docs.
+        profile_dir = tmp_dir / "lo_profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
         # 1) PPTX → PDF
         result = subprocess.run(
             [
                 "soffice",
+                f"-env:UserInstallation={profile_dir.as_uri()}",
                 "--headless",
+                "--norestore",
                 "--convert-to",
                 "pdf",
                 "--outdir",
