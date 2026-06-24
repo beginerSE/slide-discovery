@@ -64,7 +64,7 @@ SEARCH_LIMIT = 60
 
 # Facet fields surfaced on the public search screen (layoutType is
 # intentionally omitted to mirror the original React home page).
-_FACET_FIELDS = ("industry", "client", "proposalType", "graphType", "tag")
+_FACET_FIELDS = ("industry", "client", "proposalType", "graphType", "docCategory", "tag")
 
 _SLIDE_TEXT_FIELDS = (
     "slideTitle",
@@ -75,6 +75,7 @@ _SLIDE_TEXT_FIELDS = (
     "proposalType",
     "graphType",
     "layoutType",
+    "docCategory",
     "accessLevel",
     "slideText",
 )
@@ -168,6 +169,7 @@ async def _search_context(
         client=facets["client"] or None,
         proposalType=facets["proposalType"] or None,
         graphType=facets["graphType"] or None,
+        docCategory=facets["docCategory"] or None,
         tag=facets["tag"] or None,
         source=sources or None,
         session=session,
@@ -190,6 +192,7 @@ async def _search_context(
             client=facets["client"] or None,
             proposalType=facets["proposalType"] or None,
             graphType=facets["graphType"] or None,
+            docCategory=facets["docCategory"] or None,
             tag=facets["tag"] or None,
             source=sources or None,
             limit=SEARCH_LIMIT,
@@ -975,7 +978,7 @@ async def ui_admin_file_save(request: Request, file_id: str):
 
         form = await request.form()
         changed: dict = {}
-        for field in ("industry", "client", "proposalType"):
+        for field in ("industry", "client", "proposalType", "docCategory"):
             val = form.get(field) or ""
             if val != (getattr(current, field) or ""):
                 changed[field] = val

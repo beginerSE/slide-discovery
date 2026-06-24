@@ -106,6 +106,14 @@ _ENTRY_TITLE_RE = re.compile(
 
 _PPTX_EXT_RE = re.compile(r"\.pptx?$", re.IGNORECASE)
 
+# A subfolder entry in 'embeddedfolderview' links to /drive/folders/<id> and
+# renders a `drive-sprite-folder-*` icon. It does NOT carry the
+# `application/vnd.google-apps.folder` mime string (file entries link to
+# /file/d/<id>/view and carry a real type/<mime> icon), so folder detection
+# must key off the folder link / sprite, not the mime.
+_FOLDER_HREF_RE = re.compile(r"/drive/(?:u/\d+/)?folders/([a-zA-Z0-9_-]{20,})")
+_FOLDER_SPRITE_RE = re.compile(r"drive-sprite-folder", re.IGNORECASE)
+
 
 def _unescape_html(s: str) -> str:
     import html as _html
@@ -117,8 +125,10 @@ def _parse_public_folder_html(html: str) -> tuple[list[tuple[str, str]], list[st
 
     ``pptx_files`` is a list of ``(file_id, file_name)`` for .ppt/.pptx
     entries; ``subfolder_ids`` is the list of child folder ids. A flip-entry
-    is recognised as a folder when its icon URL carries the Drive folder mime
-    type (``application/vnd.google-apps.folder``).
+    is recognised as a folder when it links to ``/drive/folders/<id>`` or
+    renders the Drive folder sprite icon (``drive-sprite-folder-*``). The
+    legacy ``application/vnd.google-apps.folder`` mime is also accepted as a
+    fallback, but current Drive HTML no longer emits it.
     """
     chunks = _FOLDER_ENTRY_SPLIT_RE.split(html)[1:]
     files: list[tuple[str, str]] = []
@@ -130,10 +140,12 @@ def _parse_public_folder_html(html: str) -> tuple[list[tuple[str, str]], list[st
         if not id_m:
             continue
         eid = id_m.group(1)
-        if _FOLDER_MIME in chunk:
-            if eid not in seen_folders:
-                seen_folders.add(eid)
-                folders.append(eid)
+        folder_m = _FOLDER_HREF_RE.search(chunk)
+        if folder_m or _FOLDER_SPRITE_RE.search(chunk) or _FOLDER_MIME in chunk:
+            sub = folder_m.group(1) if folder_m else eid
+            if sub not in seen_folders:
+                seen_folders.add(sub)
+                folders.append(sub)
             continue
         title_m = _ENTRY_TITLE_RE.search(chunk)
         if not title_m:

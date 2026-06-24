@@ -369,6 +369,7 @@ async def _upsert_slide_meta(
         proposal_type=meta["proposalType"],
         graph_type=meta["graphType"],
         layout_type=meta["layoutType"],
+        doc_category=meta.get("docCategory", ""),
         tags=meta["tags"],
         summary=meta["summary"],
         reuse_hint=meta["reuseHint"],
@@ -689,6 +690,7 @@ async def _ingest_one(
                         layout_type=r.layout_type,
                         tags=list(r.tags or []),
                         client=r.client,
+                        doc_category=r.doc_category,
                     ),
                 )
                 for r in pending
@@ -1288,6 +1290,7 @@ async def backfill_missing_embeddings(batch_limit: int = 200) -> dict:
                 layout_type=row.layout_type,
                 tags=list(row.tags or []),
                 client=row.client,
+                doc_category=row.doc_category,
             )
             async with sem:
                 try:

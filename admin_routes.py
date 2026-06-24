@@ -265,6 +265,7 @@ _EDITABLE_FIELDS = {
     "proposalType": "proposal_type",
     "graphType": "graph_type",
     "layoutType": "layout_type",
+    "docCategory": "doc_category",
     "accessLevel": "access_level",
     "tags": "tags",
     "slideText": "slide_text",
@@ -285,6 +286,7 @@ _EMBEDDING_INPUT_FIELDS = {
     "proposalType",
     "graphType",
     "layoutType",
+    "docCategory",
     "tags",
 }
 
@@ -298,6 +300,7 @@ class UpdateSlideBody(BaseModel):
     proposalType: Optional[str] = None
     graphType: Optional[str] = None
     layoutType: Optional[str] = None
+    docCategory: Optional[str] = None
     accessLevel: Optional[str] = None
     tags: Optional[list[str]] = None
     slideText: Optional[str] = None
@@ -332,6 +335,7 @@ async def admin_list_slides(
                 Slide.summary.ilike(like),
                 Slide.industry.ilike(like),
                 Slide.proposal_type.ilike(like),
+                Slide.doc_category.ilike(like),
             )
         )
     total = (
@@ -412,6 +416,7 @@ _FILE_COMMON_FIELDS = {
     "industry": "industry",
     "client": "client",
     "proposalType": "proposal_type",
+    "docCategory": "doc_category",
 }
 
 
@@ -495,10 +500,12 @@ class FileCommon(BaseModel):
     industry: str
     client: str
     proposalType: str
+    docCategory: str
     tags: list[str]
     industryMixed: bool
     clientMixed: bool
     proposalTypeMixed: bool
+    docCategoryMixed: bool
     tagsMixed: bool
 
 
@@ -510,6 +517,7 @@ class UpdateFileCommonBody(BaseModel):
     industry: Optional[str] = None
     client: Optional[str] = None
     proposalType: Optional[str] = None
+    docCategory: Optional[str] = None
     tags: Optional[list[str]] = None
 
 
@@ -522,6 +530,7 @@ def _summarize_file(file_id: str, rows: list[Slide]) -> FileCommon:
     industries = {r.industry or "" for r in rows}
     clients = {r.client or "" for r in rows}
     proposals = {r.proposal_type or "" for r in rows}
+    doc_categories = {r.doc_category or "" for r in rows}
     tag_keys = [_tags_key(list(r.tags or [])) for r in rows]
     tag_sets = set(tag_keys)
     file_name = rows[0].file_name if rows else ""
@@ -548,10 +557,12 @@ def _summarize_file(file_id: str, rows: list[Slide]) -> FileCommon:
         industry=_majority([r.industry or "" for r in rows]),
         client=client_default,
         proposalType=_majority([r.proposal_type or "" for r in rows]),
+        docCategory=_majority([r.doc_category or "" for r in rows]),
         tags=tags_default,
         industryMixed=len(industries) > 1,
         clientMixed=len(clients) > 1,
         proposalTypeMixed=len(proposals) > 1,
+        docCategoryMixed=len(doc_categories) > 1,
         tagsMixed=len(tag_sets) > 1,
     )
 

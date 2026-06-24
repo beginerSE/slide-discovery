@@ -36,6 +36,9 @@ ALLOWED = {
         "タイトル中央", "左右比較", "上下分割", "4象限",
         "Before/After", "ロードマップ", "リスト",
     ],
+    "docCategory": [
+        "分析結果", "営業提案資料", "その他",
+    ],
 }
 
 PROMPT = """あなたは提案書スライドのメタデータを整理するアシスタントです。
@@ -60,6 +63,11 @@ graphType はスライドのテキストではなくサムネイル画像の見�
 - proposalType: {proposal_types}
 - graphType: {graph_types}
 - layoutType: {layout_types}
+- docCategory: {doc_categories}
+    判定の目安：
+      - データ集計・実績・現状分析・効果検証など「調べた結果」が主役 → 「分析結果」
+      - 顧客への提案・施策・サービス紹介・見積など「売り込み/提案」が主役 → 「営業提案資料」
+      - 上記どちらでもない（目次・表紙・あいさつ・付録など） → 「その他」
 - tags: 関連する短いキーワードを2〜5個（日本語）。グラフが見える場合は必ずグラフ種別を1つ含める。
 - summary: 1〜2文（80字以内）のスライド要約（日本語）。グラフが描かれている場合は要約にも「〜の円グラフ」のようにグラフ種別を明記する。
 - reuseHint: 似た案件で再利用するときのヒント（1文、日本語）
@@ -136,6 +144,7 @@ def _build_prompt() -> str:
         proposal_types=" / ".join(ALLOWED["proposalType"]),
         graph_types=" / ".join(ALLOWED["graphType"]),
         layout_types=" / ".join(ALLOWED["layoutType"]),
+        doc_categories=" / ".join(ALLOWED["docCategory"]),
     )
 
 
@@ -189,6 +198,7 @@ def _sync_extract(slide_text: str, thumbnail: Path | None, file_name: str, page_
         "proposalType": _coerce(raw.get("proposalType"), ALLOWED["proposalType"], "その他"),
         "graphType": _coerce(raw.get("graphType"), ALLOWED["graphType"], "なし"),
         "layoutType": _coerce(raw.get("layoutType"), ALLOWED["layoutType"], "タイトル中央"),
+        "docCategory": _coerce(raw.get("docCategory"), ALLOWED["docCategory"], "その他"),
         "tags": _coerce_tags(raw.get("tags")),
         "summary": str(raw.get("summary") or "").strip()[:200],
         "reuseHint": str(raw.get("reuseHint") or "").strip()[:200],

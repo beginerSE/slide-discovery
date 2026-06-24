@@ -146,6 +146,7 @@ class Slide(Base):
     proposal_type: Mapped[str] = mapped_column(String, nullable=False, default="")
     graph_type: Mapped[str] = mapped_column(String, nullable=False, default="")
     layout_type: Mapped[str] = mapped_column(String, nullable=False, default="")
+    doc_category: Mapped[str] = mapped_column(String, nullable=False, default="")
     tags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     reuse_hint: Mapped[str] = mapped_column(Text, nullable=False, default="")
@@ -199,6 +200,7 @@ class Slide(Base):
             "proposalType": self.proposal_type,
             "graphType": self.graph_type,
             "layoutType": self.layout_type,
+            "docCategory": self.doc_category,
             "tags": list(self.tags or []),
             "summary": self.summary,
             "reuseHint": self.reuse_hint,
@@ -514,7 +516,7 @@ SEARCH_EXPR = (
     "coalesce(tags::text,'') || ' ' || coalesce(industry,'') || ' ' || "
     "coalesce(client,'') || ' ' || "
     "coalesce(proposal_type,'') || ' ' || coalesce(graph_type,'') || ' ' || "
-    "coalesce(layout_type,''))"
+    "coalesce(layout_type,'') || ' ' || coalesce(doc_category,''))"
 )
 
 
@@ -540,6 +542,12 @@ async def init_db() -> None:
             text(
                 "ALTER TABLE slides ADD COLUMN IF NOT EXISTS source_type "
                 "varchar NOT NULL DEFAULT 'pptx'"
+            )
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE slides ADD COLUMN IF NOT EXISTS doc_category "
+                "varchar NOT NULL DEFAULT ''"
             )
         )
         await conn.execute(
@@ -664,6 +672,7 @@ async def init_db() -> None:
         needs_rebuild = existing_def is None or (
             "layout_type" not in (existing_def or "")
             or "graph_type" not in (existing_def or "")
+            or "doc_category" not in (existing_def or "")
         )
         if needs_rebuild:
             await conn.execute(text("DROP INDEX IF EXISTS slides_search_trgm_idx"))
@@ -681,7 +690,7 @@ async def init_db() -> None:
             )
         )
         # Facet columns get a plain btree for equality filters + sort.
-        for col in ("industry", "proposal_type", "graph_type", "layout_type"):
+        for col in ("industry", "proposal_type", "graph_type", "layout_type", "doc_category"):
             await conn.execute(
                 text(
                     f"CREATE INDEX IF NOT EXISTS slides_{col}_idx "

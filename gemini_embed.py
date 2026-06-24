@@ -124,12 +124,14 @@ def build_slide_embed_text(
     layout_type: str,
     tags: Iterable[str],
     client: str = "",
+    doc_category: str = "",
 ) -> str:
     tag_str = "、".join(t for t in tags if t)
     parts = [
         f"タイトル: {title}".strip(),
         f"要約: {summary}".strip(),
         f"業界: {industry} / 提案: {proposal_type} / グラフ: {graph_type} / 構図: {layout_type}",
+        f"資料種別: {doc_category}".strip() if doc_category else "",
         f"クライアント先: {client}".strip() if client else "",
         f"タグ: {tag_str}" if tag_str else "",
         f"本文: {body_text[:1500]}".strip(),

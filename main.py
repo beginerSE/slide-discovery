@@ -76,6 +76,7 @@ async def _seed_if_empty() -> None:
                     proposal_type=it["proposalType"],
                     graph_type=it["graphType"],
                     layout_type=it["layoutType"],
+                    doc_category=it.get("docCategory", ""),
                     tags=it.get("tags", []),
                     summary=it.get("summary", ""),
                     reuse_hint=it.get("reuseHint", ""),
@@ -264,7 +265,7 @@ def _build_keyword_where(parsed: ParsedQuery) -> tuple[Optional[str], dict]:
     return " AND ".join(clauses), params
 
 
-def _facet_filter(s: dict, industry, client, proposalType, graphType, layoutType, tag) -> bool:
+def _facet_filter(s: dict, industry, client, proposalType, graphType, layoutType, docCategory, tag) -> bool:
     if industry and s["industry"] != industry:
         return False
     if client and s.get("client", "") != client:
@@ -274,6 +275,8 @@ def _facet_filter(s: dict, industry, client, proposalType, graphType, layoutType
     if graphType and s["graphType"] != graphType:
         return False
     if layoutType and s["layoutType"] != layoutType:
+        return False
+    if docCategory and s.get("docCategory", "") != docCategory:
         return False
     if tag and tag not in s.get("tags", []):
         return False
@@ -289,6 +292,7 @@ async def search_slides(
     proposalType: Optional[str] = None,
     graphType: Optional[str] = None,
     layoutType: Optional[str] = None,
+    docCategory: Optional[str] = None,
     tag: Optional[str] = None,
     source: Optional[List[str]] = Query(None),
     limit: int = Query(60, ge=1, le=200),
@@ -304,6 +308,7 @@ async def search_slides(
         ("提案種別", proposalType),
         ("グラフ", graphType),
         ("構図", layoutType),
+        ("資料種別", docCategory),
         ("タグ", tag),
     ]
     facet_label = "、".join(f"{name}={val}" for name, val in active_facets if val)
@@ -321,6 +326,8 @@ async def search_slides(
             stmt = stmt.where(Slide.graph_type == graphType)
         if layoutType:
             stmt = stmt.where(Slide.layout_type == layoutType)
+        if docCategory:
+            stmt = stmt.where(Slide.doc_category == docCategory)
         if tag:
             stmt = stmt.where(
                 text("tags @> CAST(:tag_json AS jsonb)").bindparams(
@@ -549,6 +556,9 @@ async def get_similar(slide_id: str, session: AsyncSession = Depends(get_session
         if s["layoutType"] == src["layoutType"]:
             score += 2
             reasons.append(f'構図が同じ ({s["layoutType"]})')
+        if s.get("docCategory") and s.get("docCategory") == src.get("docCategory"):
+            score += 1
+            reasons.append(f'資料種別が同じ ({s["docCategory"]})')
         overlap = src_tags & set(s.get("tags", []))
         if overlap:
             score += len(overlap)
@@ -583,6 +593,7 @@ async def get_filters(
     proposalType: Optional[str] = None,
     graphType: Optional[str] = None,
     layoutType: Optional[str] = None,
+    docCategory: Optional[str] = None,
     tag: Optional[str] = None,
     source: Optional[List[str]] = Query(None),
     session: AsyncSession = Depends(get_session),
@@ -621,6 +632,7 @@ async def get_filters(
                 s.get("proposalType") or "",
                 s.get("graphType") or "",
                 s.get("layoutType") or "",
+                s.get("docCategory") or "",
             ]
         )
         return query_matches(parsed, haystack)
@@ -633,6 +645,7 @@ async def get_filters(
         "proposalType": proposalType,
         "graphType": graphType,
         "layoutType": layoutType,
+        "docCategory": docCategory,
         "tag": tag,
     }
 
@@ -649,6 +662,8 @@ async def get_filters(
             out = [s for s in out if s.get("graphType") == selected["graphType"]]
         if skip_field != "layoutType" and selected["layoutType"]:
             out = [s for s in out if s.get("layoutType") == selected["layoutType"]]
+        if skip_field != "docCategory" and selected["docCategory"]:
+            out = [s for s in out if s.get("docCategory") == selected["docCategory"]]
         if skip_field != "tag" and selected["tag"]:
             out = [s for s in out if selected["tag"] in (s.get("tags") or [])]
         return out
@@ -674,6 +689,7 @@ async def get_filters(
         "proposalTypes": facet("proposalType"),
         "graphTypes": facet("graphType"),
         "layoutTypes": facet("layoutType"),
+        "docCategories": facet("docCategory"),
         "tags": tag_facets,
     }
 
@@ -695,6 +711,7 @@ async def get_stats(session: AsyncSession = Depends(get_session)):
         "proposalTypes": facet("proposalType"),
         "graphTypes": facet("graphType"),
         "layoutTypes": facet("layoutType"),
+        "docCategories": facet("docCategory"),
         "recentSlides": recent,
     }
 
