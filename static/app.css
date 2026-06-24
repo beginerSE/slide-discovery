@@ -422,6 +422,57 @@ label.field-label {
   box-shadow: 0 1px 2px hsl(var(--foreground) / 0.08);
 }
 
+.source-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: hsl(var(--muted) / 0.5);
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.6rem;
+}
+.source-toggle .source-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0 0.5rem 0 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: hsl(var(--muted-foreground));
+}
+.source-toggle .source-toggle-label svg {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+.source-toggle .source-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.85rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+  border-radius: 0.45rem;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, color 0.15s;
+}
+.source-toggle .source-option svg {
+  width: 1rem;
+  height: 1rem;
+}
+.source-toggle .source-option input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.source-toggle .source-option:has(input:checked) {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  box-shadow: 0 1px 2px hsl(var(--foreground) / 0.08);
+}
+
 .hint-row {
   display: flex;
   flex-wrap: wrap;
@@ -549,6 +600,25 @@ label.field-label {
   position: relative;
 }
 .slide-card:hover { box-shadow: 0 8px 20px rgba(0,0,0,0.08); transform: translateY(-2px); }
+/* Full-card overlay link to the detail page (stretched-link pattern) so the
+   card can also host a separate real <a> to the Confluence source page
+   without nesting anchors. */
+.slide-card-link { position: absolute; inset: 0; z-index: 1; }
+.card-source-open {
+  position: relative;
+  z-index: 2;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.1rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: hsl(var(--primary));
+  text-decoration: none;
+}
+.card-source-open svg { width: 0.85rem; height: 0.85rem; }
+.card-source-open:hover { text-decoration: underline; }
 
 .thumb {
   aspect-ratio: 16 / 9;
@@ -687,6 +757,11 @@ label.field-label {
 .file-row:first-child { border-top: none; }
 .job-row { padding: 0.75rem 0; border-top: 1px solid hsl(var(--border)); }
 .job-row:first-child { border-top: none; padding-top: 0; }
+.ingested-file-list { margin: 0.3rem 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.25rem; }
+.ingested-file-list li { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; }
+.ingested-file-name { flex: 1; min-width: 0; }
+.ingested-file-meta { display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; }
+.ingested-file-time { color: hsl(var(--muted-foreground)); white-space: nowrap; }
 .file-row .ficon { width: 1.25rem; height: 1.25rem; color: hsl(var(--muted-foreground)); flex-shrink: 0; margin-top: 0.15rem; }
 .file-name { font-weight: 500; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-meta { font-size: 0.72rem; color: hsl(var(--muted-foreground)); margin-top: 0.25rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
@@ -779,6 +854,8 @@ label.field-label {
 .chat-user .chat-bubble-body { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
 .chat-ai .chat-bubble-body { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); flex: 1; }
 .chat-answer { white-space: pre-wrap; word-break: break-word; }
+.chat-pending { display: inline-flex; align-items: center; gap: 0.45rem; color: hsl(var(--muted-foreground)); font-size: 0.9rem; }
+.chat-pending .icon { width: 1rem; height: 1rem; flex: none; }
 
 .chat-sources { margin-top: 0.85rem; border-top: 1px dashed hsl(var(--border)); padding-top: 0.75rem; }
 .chat-sources-label { display: flex; align-items: center; gap: 0.35rem; font-size: 0.78rem; font-weight: 600; color: hsl(var(--muted-foreground)); margin-bottom: 0.6rem; }
@@ -789,13 +866,18 @@ label.field-label {
 .chat-source-open { display: flex; align-items: center; justify-content: center; gap: 0.3rem; padding: 0.4rem 0.5rem; font-size: 0.72rem; font-weight: 600; color: hsl(var(--primary)); border-top: 1px solid hsl(var(--border)); text-decoration: none; transition: background 0.15s; }
 .chat-source-open:hover { background: hsl(var(--muted)); }
 .chat-source-open .icon { width: 0.85rem; height: 0.85rem; }
-.chat-source-thumb { position: relative; aspect-ratio: 16/10; background: hsl(var(--muted)); }
+.chat-source-thumb { display: block; position: relative; aspect-ratio: 16/10; background: hsl(var(--muted)); }
 .chat-source-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .chat-source-noimg { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: hsl(var(--muted-foreground)); opacity: 0.4; }
 .chat-source-page { position: absolute; bottom: 0.3rem; right: 0.3rem; background: rgba(0,0,0,0.65); color: #fff; font-size: 0.65rem; padding: 0.05rem 0.35rem; border-radius: 0.25rem; }
 .chat-source-meta { padding: 0.45rem 0.5rem; display: flex; flex-direction: column; gap: 0.2rem; }
 .chat-source-file { display: flex; align-items: center; gap: 0.25rem; font-size: 0.68rem; color: hsl(var(--muted-foreground)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chat-source-ttl { font-size: 0.78rem; font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.chat-source-file .icon { flex: none; width: 0.8rem; height: 0.8rem; }
+.chat-source-file-link { color: hsl(var(--primary)); text-decoration: none; }
+.chat-source-file-link:hover { text-decoration: underline; }
+.chat-source-file-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-source-ttl { font-size: 0.78rem; font-weight: 600; line-height: 1.3; color: inherit; text-decoration: none; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.chat-source-ttl:hover { text-decoration: underline; }
 
 .chat-composer { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.75rem 0; background: linear-gradient(to top, hsl(var(--background)) 75%, transparent); }
 .chat-series { flex: 1 1 100%; align-items: center; }
@@ -806,3 +888,22 @@ label.field-label {
 .chat-send-busy { display: none; align-items: center; gap: 0.35rem; }
 .chat-composer.htmx-request .chat-send-idle { display: none; }
 .chat-composer.htmx-request .chat-send-busy { display: inline-flex; }
+
+.guide-editor { width: 100%; min-height: 24rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; line-height: 1.6; resize: vertical; }
+.markdown-body { font-size: 0.92rem; line-height: 1.7; color: hsl(var(--foreground)); }
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body h1 { font-size: 1.5rem; font-weight: 700; margin: 1.6rem 0 0.8rem; }
+.markdown-body h2 { font-size: 1.2rem; font-weight: 700; margin: 1.4rem 0 0.6rem; padding-bottom: 0.3rem; border-bottom: 1px solid hsl(var(--border)); }
+.markdown-body h3 { font-size: 1.02rem; font-weight: 600; margin: 1.1rem 0 0.5rem; }
+.markdown-body p { margin: 0.6rem 0; }
+.markdown-body ul, .markdown-body ol { margin: 0.6rem 0; padding-left: 1.5rem; display: flex; flex-direction: column; gap: 0.25rem; }
+.markdown-body li { line-height: 1.6; }
+.markdown-body a { color: hsl(var(--primary)); text-decoration: underline; }
+.markdown-body code { background: hsl(var(--muted)); padding: 0.1rem 0.35rem; border-radius: 0.25rem; font-size: 0.85em; }
+.markdown-body pre { background: hsl(var(--muted)); padding: 0.85rem 1rem; border-radius: var(--radius); overflow-x: auto; margin: 0.8rem 0; }
+.markdown-body pre code { background: none; padding: 0; }
+.markdown-body blockquote { margin: 0.8rem 0; padding: 0.4rem 0 0.4rem 1rem; border-left: 3px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); }
+.markdown-body table { border-collapse: collapse; margin: 0.8rem 0; width: 100%; }
+.markdown-body th, .markdown-body td { border: 1px solid hsl(var(--border)); padding: 0.45rem 0.65rem; text-align: left; }
+.markdown-body th { background: hsl(var(--muted)); font-weight: 600; }
+.markdown-body hr { border: none; border-top: 1px solid hsl(var(--border)); margin: 1.4rem 0; }
