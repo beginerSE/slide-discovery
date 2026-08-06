@@ -1,4 +1,4 @@
-// 提案スライド検索 — minimal client helpers (tag editor + dirty tracking)
+// 社内スライド検索 — minimal client helpers (tag editor + dirty tracking)
 
 const X_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
@@ -86,6 +86,92 @@ document.addEventListener("click", (e) => {
   input.value = chip.textContent.trim();
   input.focus();
 });
+
+// 対話検索: 詳細設定（定例シリーズ・検索対象）の折りたたみパネル。
+// デフォルト（自動判定・全ソースON）以外の設定中はボタンに「変更あり」
+// バッジを出し、今どんな条件で聞いているかを閉じたままでも示す。
+(function initChatAdvanced() {
+  const toggle = document.getElementById("chat-advanced-toggle");
+  const panel = document.getElementById("chat-advanced");
+  if (!toggle || !panel) return;
+
+  // 選んだ設定は localStorage に保存し、次回訪問時に復元する。
+  const STORAGE_KEY = "chatAdvancedSettings";
+
+  function loadSaved() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      return data && typeof data === "object" ? data : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function saveSettings() {
+    try {
+      const data = {};
+      const series = panel.querySelector('[name="seriesId"]');
+      if (series) data.seriesId = series.value;
+      const sources = panel.querySelectorAll('[name="source"]');
+      if (sources.length) {
+        data.sources = {};
+        sources.forEach((cb) => {
+          data.sources[cb.value] = cb.checked;
+        });
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch (_) {
+      /* localStorage unavailable — persistence is best-effort */
+    }
+  }
+
+  function restoreSettings() {
+    const data = loadSaved();
+    if (!data) return;
+    const series = panel.querySelector('[name="seriesId"]');
+    if (series && typeof data.seriesId === "string") {
+      // 保存済みシリーズが削除されていたら自動判定（空値）に戻す。
+      const exists = Array.from(series.options).some((o) => o.value === data.seriesId);
+      series.value = exists ? data.seriesId : "";
+    }
+    if (data.sources && typeof data.sources === "object") {
+      panel.querySelectorAll('[name="source"]').forEach((cb) => {
+        if (typeof data.sources[cb.value] === "boolean") cb.checked = data.sources[cb.value];
+      });
+    }
+  }
+
+  toggle.addEventListener("click", () => {
+    const open = panel.hasAttribute("hidden");
+    if (open) panel.removeAttribute("hidden");
+    else panel.setAttribute("hidden", "");
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
+  const badge = toggle.querySelector(".chat-advanced-badge");
+  function nonDefault() {
+    const series = panel.querySelector('[name="seriesId"]');
+    if (series && series.value) return true;
+    const sources = panel.querySelectorAll('[name="source"]');
+    for (const cb of sources) {
+      if (!cb.checked) return true;
+    }
+    return false;
+  }
+  function syncBadge() {
+    if (!badge) return;
+    if (nonDefault()) badge.removeAttribute("hidden");
+    else badge.setAttribute("hidden", "");
+  }
+  panel.addEventListener("change", () => {
+    saveSettings();
+    syncBadge();
+  });
+  restoreSettings();
+  syncBadge();
+})();
 
 // 対話検索: scroll newly appended turns into view.
 document.body && document.body.addEventListener("htmx:afterSwap", (e) => {

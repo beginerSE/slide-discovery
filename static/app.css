@@ -1,4 +1,4 @@
-/* 提案スライド検索 — server-rendered UI styles */
+/* 社内スライド検索 — server-rendered UI styles */
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap");
 
 :root {
@@ -342,6 +342,24 @@ label.field-label {
 .badge-primary { background: hsl(var(--primary)); color: hsl(var(--primary-foreground)); }
 .badge-destructive { background: hsl(var(--destructive)); color: hsl(var(--destructive-foreground)); }
 .badge-amber { background: transparent; border-color: hsl(var(--amber) / 0.5); color: hsl(var(--amber)); }
+
+/* 資料種別 (docCategory) — 分析結果=青系 / 営業提案資料=緑系。検索結果で
+   一目で見分けられるよう他バッジより強い配色。リンク時はカードの
+   stretched-link より前面 (z-index:2) に出してクリック可能にする。 */
+.doccat-badge { font-weight: 600; position: relative; z-index: 2; }
+.doccat-badge svg { width: 0.75rem; height: 0.75rem; }
+.doccat-analysis {
+  background: hsl(207 80% 94%);
+  color: hsl(210 70% 32%);
+  border-color: hsl(208 65% 78%);
+}
+.doccat-proposal {
+  background: hsl(145 55% 93%);
+  color: hsl(150 55% 25%);
+  border-color: hsl(145 45% 72%);
+}
+a.doccat-analysis:hover { background: hsl(207 80% 88%); }
+a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 
 /* ---------- Search page ---------- */
 .search-panel {
@@ -951,6 +969,26 @@ label.field-label {
 .chat-series-hint strong { color: hsl(var(--foreground)); font-weight: 600; }
 .chat-series-used { display: inline-flex; align-items: center; gap: 0.35rem; margin-top: 0.5rem; }
 .chat-input { flex: 1; min-width: 12rem; }
+.chat-input-row { flex: 1 1 100%; display: flex; gap: 0.5rem; align-items: center; }
+.chat-advanced {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+.chat-advanced[hidden] { display: none; }
+.chat-advanced-toggle { flex: none; }
+.chat-advanced-toggle[aria-expanded="true"] {
+  background: hsl(var(--accent));
+  border-color: hsl(var(--ring) / 0.4);
+}
+.chat-advanced-badge { flex: none; }
+@media (max-width: 560px) { .chat-advanced-label { display: none; } }
 .chat-send { flex: none; display: inline-flex; align-items: center; gap: 0.35rem; }
 .chat-send-busy { display: none; align-items: center; gap: 0.35rem; }
 .chat-composer.htmx-request .chat-send-idle { display: none; }
