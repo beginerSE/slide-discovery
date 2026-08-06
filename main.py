@@ -1,4 +1,4 @@
-"""提案スライド検索 — FastAPI backend."""
+"""社内スライド検索 — FastAPI backend."""
 from __future__ import annotations
 
 import asyncio
@@ -117,6 +117,16 @@ async def _initialize_backend() -> None:
     try:
         await init_db()
         await _seed_if_empty()
+        # Load admin-editable Confluence settings (DB) into config's cache so
+        # the resolved values are correct on the very first request.
+        try:
+            from confluence_settings import refresh_cache
+            from db import SessionLocal
+
+            async with SessionLocal() as _s:
+                await refresh_cache(_s)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("confluence settings cache refresh failed: %s", exc)
         # Clear jobs/files left "running"/"processing" by a previous process
         # that died mid-ingest, so they don't block scheduling or show forever.
         await reap_orphaned_jobs()
@@ -147,7 +157,7 @@ async def lifespan(app: FastAPI):
             stop_scheduler()
 
 
-app = FastAPI(title="提案スライド検索 API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="社内スライド検索 API", version="1.0.0", lifespan=lifespan)
 
 _session_secret = os.environ.get("SESSION_SECRET")
 if not _session_secret:
@@ -305,7 +315,7 @@ async def search_slides(
     active_facets = [
         ("業界", industry),
         ("クライアント先", client),
-        ("提案種別", proposalType),
+        ("スライド種別", proposalType),
         ("グラフ", graphType),
         ("構図", layoutType),
         ("資料種別", docCategory),
@@ -560,7 +570,7 @@ async def get_similar(slide_id: str, session: AsyncSession = Depends(get_session
             reasons.append(f'業界が同じ ({s["industry"]})')
         if s["proposalType"] == src["proposalType"]:
             score += 1
-            reasons.append(f'提案種別が同じ ({s["proposalType"]})')
+            reasons.append(f'スライド種別が同じ ({s["proposalType"]})')
         if s["graphType"] == src["graphType"] and s["graphType"] != "なし":
             score += 2
             reasons.append(f'グラフ種別が同じ ({s["graphType"]})')

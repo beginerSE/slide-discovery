@@ -1342,10 +1342,42 @@ async def backfill_missing_embeddings(batch_limit: int = 200) -> dict:
     return {"filled": filled, "failed": failed, "remaining": int(remaining)}
 
 
+EMBED_DOC_VERSION_KEY = "embed_doc_version"
+
+
+async def invalidate_stale_embeddings() -> bool:
+    """Clear ALL embeddings when the embedding document contract changed.
+
+    ``build_slide_embed_text`` output is versioned (gemini_embed.
+    EMBED_DOC_VERSION). When the stored version differs, existing vectors
+    were computed from a different document format, so they are nulled and
+    the regular ``embedding IS NULL`` backfill rebuilds the corpus. Pure
+    data UPDATE (no DDL) so it is safe to run on every boot. Returns True
+    when an invalidation happened."""
+    from gemini_embed import EMBED_DOC_VERSION
+
+    from db import AppState
+
+    current = str(EMBED_DOC_VERSION)
+    async with SessionLocal() as session:
+        row = await session.get(AppState, EMBED_DOC_VERSION_KEY)
+        if row is not None and row.value == current:
+            return False
+        await session.execute(update(Slide).values(embedding=None))
+        if row is None:
+            session.add(AppState(key=EMBED_DOC_VERSION_KEY, value=current))
+        else:
+            row.value = current
+        await session.commit()
+    log.info("embedding doc version -> %s: cleared all embeddings for re-embed", current)
+    return True
+
+
 def schedule_backfill_embeddings() -> None:
     """Fire-and-forget backfill kicked off at startup."""
     async def _run() -> None:
         try:
+            await invalidate_stale_embeddings()
             await backfill_missing_embeddings()
         except Exception:
             log.exception("embedding backfill task crashed")
@@ -1478,6 +1510,10 @@ async def run_confluence_ingest(
                     await session.commit()
 
     try:
+        import confluence_settings
+
+        async with SessionLocal() as session:
+            await confluence_settings.refresh_cache(session)
         space = await confluence.get_space(space_id)
         if space is None:
             raise RuntimeError(f"スペースが見つかりません (id={space_id})")

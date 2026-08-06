@@ -113,6 +113,15 @@ async def embed_text(
     raise last
 
 
+# Version of the embedding *document contract* produced by
+# build_slide_embed_text. Bump this whenever the text format changes
+# (fields, labels, truncation limits): at startup, a stored version mismatch
+# clears every existing embedding so the backfill re-embeds the whole corpus
+# under the new contract (see ingest.schedule_backfill_embeddings).
+# v2: body cap 1500→3000 chars, 提案→種別 label, doc-type-neutral wording.
+EMBED_DOC_VERSION = 2
+
+
 def build_slide_embed_text(
     *,
     title: str,
@@ -130,10 +139,12 @@ def build_slide_embed_text(
     parts = [
         f"タイトル: {title}".strip(),
         f"要約: {summary}".strip(),
-        f"業界: {industry} / 提案: {proposal_type} / グラフ: {graph_type} / 構図: {layout_type}",
+        f"業界: {industry} / 種別: {proposal_type} / グラフ: {graph_type} / 構図: {layout_type}",
         f"資料種別: {doc_category}".strip() if doc_category else "",
         f"クライアント先: {client}".strip() if client else "",
         f"タグ: {tag_str}" if tag_str else "",
-        f"本文: {body_text[:1500]}".strip(),
+        # 分析・報告資料は本文後半に数値詳細や結論が来ることが多いため、
+        # 埋め込みには本文を 3000 字まで含める（抽出時の上限は 4000 字）。
+        f"本文: {body_text[:3000]}".strip(),
     ]
     return "\n".join(p for p in parts if p)

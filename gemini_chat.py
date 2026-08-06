@@ -20,7 +20,9 @@ log = logging.getLogger("api.chat")
 CHAT_MODEL = "gemini-2.5-flash"
 
 _SYSTEM_INSTRUCTION = (
-    "あなたは社内の提案スライド検索アシスタントです。"
+    "あなたは「社内スライド検索」のAIアシスタントです。"
+    "社内のスライド資料（営業提案資料・分析結果の報告資料など）を"
+    "AIで横断・詳細に検索して回答します。"
     "ユーザーの質問に対し、以下の「参考スライド」に書かれている情報だけを"
     "根拠にして、日本語で簡潔に回答してください。\n"
     "ルール:\n"
@@ -31,6 +33,11 @@ _SYSTEM_INSTRUCTION = (
     "- 質問に合致する資料が無い場合は「該当する資料は見つかりませんでした。」"
     "とだけ答える。\n"
     "- 箇条書きや短い文章で、要点を分かりやすくまとめる。\n"
+    "- 分析結果や数値を尋ねる質問（「〜の分析結果は？」「〜の数値は？」など）"
+    "には、参考スライドに書かれている具体的な数値・指標・結論をそのまま"
+    "引用して答える。数値を勝手に丸めたり計算し直したりしない。\n"
+    "- 資料種別（営業提案資料 / 分析結果）が与えられた場合は、提案内容か"
+    "分析結果かを区別して回答する（例: 提案時の想定値か、実測の分析結果か）。\n"
     "- 「直近の定例の流れ」が与えられた場合は、その定例シリーズの時系列"
     "（新しい順）を踏まえ、最近の経緯や変化を補足してよい。その際は"
     "どの回（日付・ファイル名）の内容かを明記する。"
@@ -75,14 +82,24 @@ def build_chat_prompt(
         ]
         if s.get("summary"):
             parts.append(f"要約: {s['summary']}")
-        if s.get("industry") or s.get("client") or s.get("proposalType"):
+        if (
+            s.get("industry")
+            or s.get("client")
+            or s.get("proposalType")
+            or s.get("docCategory")
+        ):
             parts.append(
                 f"業界: {s.get('industry') or '-'}"
                 f" / クライアント先: {s.get('client') or '-'}"
-                f" / 提案種別: {s.get('proposalType') or '-'}"
+                f" / スライド種別: {s.get('proposalType') or '-'}"
+                f" / 資料種別: {s.get('docCategory') or '-'}"
             )
         if body:
-            parts.append(f"本文抜粋: {body[:600]}")
+            # 分析・報告資料は本文後半に数値詳細や結論が来ることが多い。
+            # 埋め込み（3000字）でヒットした根拠がGeminiにも渡るよう、
+            # 回答コンテキストにも本文を2000字まで含める（topK≤20 でも
+            # Gemini 2.5 Flash のコンテキストに余裕で収まる）。
+            parts.append(f"本文抜粋: {body[:2000]}")
         blocks.append("\n".join(parts))
     context = "\n\n".join(blocks) if blocks else "（参考スライドはありません）"
     series_block = _build_series_block(series)

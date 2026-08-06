@@ -221,18 +221,37 @@ def confluence_base_url() -> str | None:
     in dev and prod — Confluence always authenticates with an API token (there
     is no GCP-native variant), mirroring the Gemini dev/prod split.
     """
+    from confluence_settings import cached_base_url
+
+    db = cached_base_url()
+    if db:
+        return db
     v = (os.environ.get("CONFLUENCE_BASE_URL") or "").strip().rstrip("/")
     return v or None
 
 
 def confluence_email() -> str | None:
-    """Atlassian account email that owns the API token (Basic-auth username)."""
+    """Atlassian account email that owns the API token (Basic-auth username).
+
+    A DB-stored value (set by an admin in the 設定 screen) overrides the env."""
+    from confluence_settings import cached_email
+
+    db = cached_email()
+    if db:
+        return db
     v = (os.environ.get("CONFLUENCE_EMAIL") or "").strip()
     return v or None
 
 
 def confluence_api_token() -> str | None:
-    """Confluence Cloud API token (Basic-auth password)."""
+    """Confluence Cloud API token (Basic-auth password).
+
+    A DB-stored value (set by an admin in the 設定 screen) overrides the env."""
+    from confluence_settings import cached_api_token
+
+    db = cached_api_token()
+    if db:
+        return db
     v = (os.environ.get("CONFLUENCE_API_TOKEN") or "").strip()
     return v or None
 
