@@ -53,7 +53,17 @@
     <div class="card"><div class="card-body text-sm text-muted">Confluence 連携を確認中…</div></div>
   </div>
 
-  <div id="admin-files" hx-get="/ui/admin/files" hx-trigger="load, every 5s, refreshAdminFiles from:body" hx-swap="innerHTML">
+  {# ファイル名絞り込み。入力欄はポーリングで差し替わる #admin-files の外に
+     置いて、5秒ごとの自動更新でも入力中のフォーカス・値を失わないようにする。
+     hx-include で fq が自動更新リクエストにも引き継がれる。 #}
+  <div class="search-box">
+    {{ m.icon("search", "search-icon") }}
+    <input class="input" type="text" id="admin-files-q" name="fq" placeholder="登録済みファイルをファイル名で絞り込み" autocomplete="off"
+      hx-get="/ui/admin/files" hx-target="#admin-files" hx-swap="innerHTML"
+      hx-trigger="input changed delay:300ms, keyup[key=='Enter']" />
+  </div>
+  <div id="admin-files" hx-get="/ui/admin/files" hx-trigger="load, every 5s, refreshAdminFiles from:body" hx-swap="innerHTML"
+       hx-include="#admin-files-q">
     {% include "_admin_files.html" %}
   </div>
 </div>

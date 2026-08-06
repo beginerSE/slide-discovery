@@ -956,7 +956,10 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 .chat-source-ttl { font-size: 0.78rem; font-weight: 600; line-height: 1.3; color: inherit; text-decoration: none; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .chat-source-ttl:hover { text-decoration: underline; }
 
-.chat-composer { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.75rem 0; background: linear-gradient(to top, hsl(var(--background)) 75%, transparent); }
+/* 縦積みレイアウト（詳細設定パネル → 入力行）。以前は flex-wrap の横並びで、
+   狭い幅や「検索中…」でボタン幅が変わると送信ボタンが入力欄の下に落ちて
+   崩れることがあった。入力行は folding しない（下の .chat-input-row）。 */
+.chat-composer { position: sticky; bottom: 0; display: flex; flex-direction: column; gap: 0.5rem; padding: 0.75rem 0; background: linear-gradient(to top, hsl(var(--background)) 75%, transparent); }
 .chat-series-field { flex: 1 1 100%; }
 .chat-series { align-items: center; }
 .chat-series select { flex: 1; min-width: 0; }
@@ -968,8 +971,10 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 .chat-series-hint .icon { flex-shrink: 0; margin-top: 0.15rem; }
 .chat-series-hint strong { color: hsl(var(--foreground)); font-weight: 600; }
 .chat-series-used { display: inline-flex; align-items: center; gap: 0.35rem; margin-top: 0.5rem; }
-.chat-input { flex: 1; min-width: 12rem; }
-.chat-input-row { flex: 1 1 100%; display: flex; gap: 0.5rem; align-items: center; }
+/* 入力行は絶対に折り返さない: 入力欄だけが縮み (min-width:0)、ボタン類は
+   固定幅 (flex:none) で常に入力欄の横に並ぶ。 */
+.chat-input { flex: 1 1 auto; min-width: 0; }
+.chat-input-row { display: flex; flex-wrap: nowrap; gap: 0.5rem; align-items: center; width: 100%; }
 .chat-advanced {
   flex: 1 1 100%;
   display: flex;
@@ -989,7 +994,7 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 }
 .chat-advanced-badge { flex: none; }
 @media (max-width: 560px) { .chat-advanced-label { display: none; } }
-.chat-send { flex: none; display: inline-flex; align-items: center; gap: 0.35rem; }
+.chat-send { flex: none; white-space: nowrap; display: inline-flex; align-items: center; gap: 0.35rem; }
 .chat-send-busy { display: none; align-items: center; gap: 0.35rem; }
 .chat-composer.htmx-request .chat-send-idle { display: none; }
 .chat-composer.htmx-request .chat-send-busy { display: inline-flex; }

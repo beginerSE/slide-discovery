@@ -6,10 +6,22 @@
   "failed": ("失敗", "badge-destructive", "alert")
 } %}
 <div class="card">
-  <div class="card-header"><div class="text-sm font-semibold">登録済みファイル（{{ files|length }}）</div></div>
+  {% set fq = fq | default("") %}
+  {% set files_total = files_total | default(files|length) %}
+  <div class="card-header"><div class="text-sm font-semibold">
+    {%- if fq -%}
+    登録済みファイル（絞り込み結果 {{ files|length }} / 全体 {{ files_total }}）
+    {%- else -%}
+    登録済みファイル（{{ files|length }}）
+    {%- endif -%}
+  </div></div>
   <div class="card-body">
     {% if files|length == 0 %}
+    {% if fq %}
+    <p class="text-sm text-muted" style="text-align:center;padding:2rem 0">「{{ fq }}」に一致するファイルはありません。</p>
+    {% else %}
     <p class="text-sm text-muted" style="text-align:center;padding:2rem 0">まだ登録されたファイルはありません。上のフォームから共有リンクを追加してください。</p>
+    {% endif %}
     {% else %}
     <div>
       {% for f in files %}
@@ -31,11 +43,11 @@
         </div>
         <div class="row gap-2 shrink-0">
           <button class="btn btn-ghost btn-icon" title="再取り込み"
-            hx-post="/ui/admin/files/{{ f.id }}/retry" hx-target="#admin-files" hx-swap="innerHTML">{{ m.icon("rotate-cw") }}</button>
+            hx-post="/ui/admin/files/{{ f.id }}/retry" hx-target="#admin-files" hx-swap="innerHTML" hx-include="#admin-files-q">{{ m.icon("rotate-cw") }}</button>
           <button class="btn btn-ghost btn-icon" title="サムネイル再生成（AI再解析なし）"
-            hx-post="/ui/admin/files/{{ f.id }}/regen-thumbnails" hx-target="#admin-files" hx-swap="innerHTML">{{ m.icon("image") }}</button>
+            hx-post="/ui/admin/files/{{ f.id }}/regen-thumbnails" hx-target="#admin-files" hx-swap="innerHTML" hx-include="#admin-files-q">{{ m.icon("image") }}</button>
           <button class="btn btn-ghost btn-icon" title="削除"
-            hx-post="/ui/admin/files/{{ f.id }}/delete" hx-target="#admin-files" hx-swap="innerHTML"
+            hx-post="/ui/admin/files/{{ f.id }}/delete" hx-target="#admin-files" hx-swap="innerHTML" hx-include="#admin-files-q"
             hx-confirm="{{ f.fileName or f.driveFileId }} と関連スライドを削除しますか？">{{ m.icon("trash", "text-destructive") }}</button>
         </div>
       </div>
