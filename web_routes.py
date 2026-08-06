@@ -586,17 +586,16 @@ async def ui_admin_tree(request: Request):
         )
 
 
-@web_router.get("/ui/admin/confluence", response_class=HTMLResponse)
-async def ui_admin_confluence(request: Request):
+async def _render_confluence(request: Request, session):
+    """Render the Confluence ingest partial (space picker) shown on the
+    取り込み管理 page. Connection settings live on the サイト管理 page."""
     import config
+    import confluence_settings
 
-    async with SessionLocal() as session:
-        user, err = await _require_admin(request, session)
-        if err is not None:
-            return err
+    await confluence_settings.refresh_cache(session)
+    enabled = config.confluence_enabled()
     spaces: list[dict] = []
     error = None
-    enabled = config.confluence_enabled()
     if enabled:
         import confluence
 
@@ -617,6 +616,104 @@ async def ui_admin_confluence(request: Request):
             "error": error,
         },
     )
+
+
+async def _render_confluence_settings(request: Request, session, *, notice=None):
+    """Render the Confluence connection-settings partial (サイト管理 page).
+    Shared by the GET view and the save/delete actions so they all reflect
+    the latest resolved state."""
+    import config
+    import confluence_settings
+
+    await confluence_settings.refresh_cache(session)
+    settings = await confluence_settings.get_settings(session)
+    enabled = config.confluence_enabled()
+    # True when the live config is satisfied only by env vars (nothing in DB) —
+    # surfaced so the admin understands where the active values come from.
+    env_active = enabled and not (
+        settings["base_url"] and settings["email"] and settings["has_token"]
+    )
+    return templates.TemplateResponse(
+        request,
+        "_admin_confluence_settings.html",
+        {
+            "request": request,
+            "settings": settings,
+            "env_active": env_active,
+            "notice": notice,
+        },
+    )
+
+
+@web_router.get("/admin/site", response_class=HTMLResponse)
+async def admin_site_page(request: Request):
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        return templates.TemplateResponse(
+            request,
+            "admin_site.html",
+            {
+                "request": request,
+                "user": _user_dict(user),
+                "active_nav": "/admin/site",
+            },
+        )
+
+
+@web_router.get("/ui/admin/confluence", response_class=HTMLResponse)
+async def ui_admin_confluence(request: Request):
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        return await _render_confluence(request, session)
+
+
+@web_router.get("/ui/admin/confluence/settings", response_class=HTMLResponse)
+async def ui_admin_confluence_settings_view(request: Request):
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        return await _render_confluence_settings(request, session)
+
+
+@web_router.post("/ui/admin/confluence/settings", response_class=HTMLResponse)
+async def ui_admin_confluence_settings(request: Request):
+    import confluence_settings
+
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        form = await request.form()
+        await confluence_settings.save_settings(
+            session,
+            base_url=(form.get("base_url") or ""),
+            email=(form.get("email") or ""),
+            api_token=(form.get("api_token") or ""),
+        )
+        return await _render_confluence_settings(
+            request, session, notice="接続情報を保存しました。"
+        )
+
+
+@web_router.post(
+    "/ui/admin/confluence/settings/delete", response_class=HTMLResponse
+)
+async def ui_admin_confluence_settings_delete(request: Request):
+    import confluence_settings
+
+    async with SessionLocal() as session:
+        user, err = await _require_admin(request, session)
+        if err is not None:
+            return err
+        await confluence_settings.clear_settings(session)
+        return await _render_confluence_settings(
+            request, session, notice="接続情報を削除しました。"
+        )
 
 
 @web_router.post("/ui/admin/confluence/run", response_class=HTMLResponse)
