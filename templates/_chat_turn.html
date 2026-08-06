@@ -49,6 +49,7 @@
                 <div class="chat-source-file" title="{{ s.fileName }}">{{ m.icon("file-text") }}{{ s.fileName }}</div>
                 {% endif %}
                 <a href="/slides/{{ s.slideId }}" class="chat-source-ttl">{{ s.slideTitle or "無題のスライド" }}</a>
+                {{ m.doc_category_badge(s, link=False) }}
               </div>
             </div>
             {% if s.sourceUrl %}

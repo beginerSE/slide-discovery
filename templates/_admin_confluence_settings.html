@@ -1,0 +1,46 @@
+{% import "_macros.html" as m %}
+<div class="card">
+  <div class="card-header">
+    <div class="text-base font-semibold row gap-2">{{ m.icon("lock") }}<span>Confluence 接続設定</span></div>
+  </div>
+  <div class="card-body">
+    {% if notice %}
+    <div class="alert alert-success mb-2">{{ notice }}</div>
+    {% endif %}
+    {% if env_active %}
+    <div class="alert mb-2 text-sm">
+      現在は環境変数の値で接続しています。下のフォームで保存すると、その値で上書きされます（DBの値が優先されます）。
+    </div>
+    {% endif %}
+    <p class="text-sm text-muted mb-2" style="max-width:46rem">
+      Confluence Cloud の接続情報を入力します。API トークンは暗号化して保存され、画面には再表示されません。
+      （取得方法: Atlassian アカウント → セキュリティ → API トークンの作成）
+    </p>
+    <form hx-post="/ui/admin/confluence/settings" hx-target="#admin-confluence-settings" hx-swap="innerHTML" class="stack gap-2" style="max-width:42rem">
+      <label class="stack" style="gap:0.25rem">
+        <span class="text-xs text-muted">サイト URL（例: https://your-site.atlassian.net）</span>
+        <input class="input" type="url" name="base_url" value="{{ settings.base_url }}" placeholder="https://your-site.atlassian.net" />
+      </label>
+      <label class="stack" style="gap:0.25rem">
+        <span class="text-xs text-muted">アカウントメール</span>
+        <input class="input" type="email" name="email" value="{{ settings.email }}" placeholder="you@example.com" />
+      </label>
+      <label class="stack" style="gap:0.25rem">
+        <span class="text-xs text-muted">API トークン{% if settings.has_token %}（設定済み）{% endif %}</span>
+        <input class="input" type="password" name="api_token" autocomplete="new-password"
+               placeholder="{% if settings.has_token %}変更する場合のみ入力（空欄で現在の値を保持）{% else %}API トークンを入力{% endif %}" />
+      </label>
+      <div class="row gap-2 wrap">
+        <button type="submit" class="btn shrink-0">{{ m.icon("save") }}保存</button>
+        {% if settings.base_url or settings.email or settings.has_token %}
+        <button type="submit" class="btn btn-outline shrink-0"
+                hx-post="/ui/admin/confluence/settings/delete"
+                hx-target="#admin-confluence-settings" hx-swap="innerHTML"
+                hx-confirm="保存済みの Confluence 接続情報を削除します。よろしいですか？">
+          {{ m.icon("trash") }}削除
+        </button>
+        {% endif %}
+      </div>
+    </form>
+  </div>
+</div>

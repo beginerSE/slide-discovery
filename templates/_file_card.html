@@ -19,7 +19,7 @@
           <input class="input" name="client" value="{{ file.client }}" placeholder="{{ '（混在 → 統一する）' if file.clientMixed else '例: 株式会社〇〇' }}" />
         </div>
         <div class="field">
-          <div class="row gap-2 mb-2"><label class="field-label">提案種別</label>{% if file.proposalTypeMixed %}{{ mixed() }}{% endif %}</div>
+          <div class="row gap-2 mb-2"><label class="field-label">スライド種別</label>{% if file.proposalTypeMixed %}{{ mixed() }}{% endif %}</div>
           <input class="input" name="proposalType" value="{{ file.proposalType }}" placeholder="{{ '（混在 → 統一する）' if file.proposalTypeMixed else '例: 新規提案' }}" />
         </div>
         <div class="field">

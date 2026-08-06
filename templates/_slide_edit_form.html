@@ -5,7 +5,7 @@
 
   <div class="card">
     <div class="card-header"><div class="text-base font-semibold">メタデータ編集</div>
-      <p class="text-xs text-muted mt-1">AIによる自動抽出結果を確認し、必要に応じて修正してください。業界・提案種別・グラフ・構図は入力済みの値以外も自由に記入できます。</p>
+      <p class="text-xs text-muted mt-1">AIによる自動抽出結果を確認し、必要に応じて修正してください。業界・スライド種別・グラフ・構図は入力済みの値以外も自由に記入できます。</p>
     </div>
     <div class="card-body space-y">
       <div class="field">
@@ -16,7 +16,7 @@
       <div class="two-col-form">
         <div class="field"><label class="field-label">業界</label><input class="input mt-1" name="industry" value="{{ slide.industry }}" placeholder="例: 金融 / 小売 / EC" /></div>
         <div class="field"><label class="field-label">クライアント先</label><input class="input mt-1" name="client" value="{{ slide.client }}" placeholder="例: 株式会社〇〇 / A社" /></div>
-        <div class="field"><label class="field-label">提案種別</label><input class="input mt-1" name="proposalType" value="{{ slide.proposalType }}" placeholder="例: 新規提案 / 改善提案" /></div>
+        <div class="field"><label class="field-label">スライド種別</label><input class="input mt-1" name="proposalType" value="{{ slide.proposalType }}" placeholder="例: 新規提案 / 改善提案" /></div>
         <div class="field"><label class="field-label">グラフ種別</label><input class="input mt-1" name="graphType" value="{{ slide.graphType }}" placeholder="例: 円グラフ / 棒グラフ / なし" /></div>
         <div class="field"><label class="field-label">構図</label><input class="input mt-1" name="layoutType" value="{{ slide.layoutType }}" placeholder="例: 比較 / タイムライン" /></div>
         <div class="field"><label class="field-label">資料種別</label><input class="input mt-1" name="docCategory" value="{{ slide.docCategory }}" placeholder="分析結果 / 営業提案資料 / その他" /></div>

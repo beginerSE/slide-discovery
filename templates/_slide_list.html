@@ -4,7 +4,7 @@
   <div class="text-sm font-semibold">スライド一覧（{{ "{:,}".format(total) }} 件）</div>
   <div class="search-box">
     {{ m.icon("search", "search-icon") }}
-    <input class="input" type="text" name="q" value="{{ q or '' }}" placeholder="タイトル / ファイル名 / 概要 / 業界 / 提案種別 を入力してEnterまたは検索ボタン" autocomplete="off"
+    <input class="input" type="text" name="q" value="{{ q or '' }}" placeholder="タイトル / ファイル名 / 概要 / 業界 / スライド種別 を入力してEnterまたは検索ボタン" autocomplete="off"
       hx-get="/ui/admin/slides-list" hx-target="#slide-list" hx-swap="innerHTML"
       hx-trigger="keyup[key=='Enter']" hx-vals='{"page": 0}' />
     <button type="button" class="btn search-btn"
@@ -32,6 +32,7 @@
         </div>
         <div class="text-xs text-muted truncate" title="{{ s.fileName }}">{{ s.fileName }}</div>
         <div class="row wrap gap-2">
+          {{ m.doc_category_badge(s, link=False) }}
           {% if s.industry %}<span class="badge">{{ s.industry }}</span>{% endif %}
           {% if s.proposalType %}<span class="badge badge-outline">{{ s.proposalType }}</span>{% endif %}
           {% if s.graphType %}<span class="badge badge-outline">グラフ: {{ s.graphType }}</span>{% endif %}

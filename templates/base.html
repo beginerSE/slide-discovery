@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>{% block title %}提案スライド検索{% endblock %}</title>
+  <title>{% block title %}社内スライド検索{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}" />
   <script src="{{ url_for('static', path='htmx.min.js') }}" defer></script>
   <script src="{{ url_for('static', path='app.js') }}" defer></script>
@@ -13,7 +13,7 @@
   <div class="app">
     <aside class="sidebar">
       <div class="sidebar-header">
-        <a href="/" class="brand">{{ m.icon("presentation") }}<span>提案スライド検索</span></a>
+        <a href="/" class="brand">{{ m.icon("presentation") }}<span>社内スライド検索</span></a>
       </div>
       <nav class="sidebar-content">
         <div class="nav-label">メニュー</div>
@@ -30,6 +30,7 @@
         <a href="/admin/users" class="nav-item {% if active_nav == '/admin/users' %}active{% endif %}">{{ m.icon("user") }}<span>ユーザー管理</span></a>
         <a href="/admin/logs" class="nav-item {% if active_nav == '/admin/logs' %}active{% endif %}">{{ m.icon("layers") }}<span>追加履歴</span></a>
         <a href="/admin/guide" class="nav-item {% if active_nav == '/admin/guide' %}active{% endif %}">{{ m.icon("pencil") }}<span>ガイド編集</span></a>
+        <a href="/admin/site" class="nav-item {% if active_nav == '/admin/site' %}active{% endif %}">{{ m.icon("settings") }}<span>サイト管理</span></a>
         {% endif %}
       </nav>
       <div class="sidebar-footer">
@@ -53,7 +54,8 @@
 
     <div class="main">
       <header class="topbar">
-        <span>提案スライド検索</span>
+        <span>社内スライド検索</span>
+        <span class="text-muted text-sm" style="margin-left:.75rem">AIが社内のスライド資料を横断・詳細に検索</span>
       </header>
       <main class="content">
         {% block content %}{% endblock %}

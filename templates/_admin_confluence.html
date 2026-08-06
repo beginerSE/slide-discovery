@@ -6,8 +6,7 @@
   <div class="card-body">
     {% if not confluence_enabled %}
     <div class="alert alert-error">
-      Confluence 連携が未設定です。<code>CONFLUENCE_BASE_URL</code> /
-      <code>CONFLUENCE_EMAIL</code> / <code>CONFLUENCE_API_TOKEN</code> を設定してください。
+      Confluence 連携が未設定です。<a href="/admin/site">サイト管理</a> で サイト URL / メール / API トークン を保存してください。
     </div>
     {% elif error %}
     <div class="alert alert-error">{{ error }}</div>
@@ -17,6 +16,7 @@
     <p class="text-sm text-muted mb-2" style="max-width:46rem">
       選択したスペースの全ページを取り込みます。1ページ = 1件として検索対象になります。
       （変更がないページは再取り込み時にスキップされます）
+      接続情報の変更は <a href="/admin/site">サイト管理</a> から行えます。
     </p>
     <form hx-post="/ui/admin/confluence/run" hx-target="#admin-run" hx-swap="innerHTML" class="row gap-2 wrap" style="align-items:flex-end">
       <label class="stack" style="gap:0.25rem;flex:1;min-width:16rem">

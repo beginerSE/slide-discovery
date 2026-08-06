@@ -40,6 +40,7 @@
   "message-circle": '<path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/>',
   "send": '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
   "folder": '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  "settings": '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
   "circle-dashed": '<path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0"/><path d="M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7"/><path d="M21.82 10.1a9.93 9.93 0 0 1 0 3.8"/><path d="M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69"/><path d="M13.9 21.82a9.94 9.94 0 0 1-3.8 0"/><path d="M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7"/><path d="M2.18 13.9a9.93 9.93 0 0 1 0-3.8"/><path d="M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"/>'
 } %}
 <svg class="icon {{ cls }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{{ paths.get(name, "") | safe }}</svg>
@@ -50,6 +51,21 @@
 {% macro source_badge(slide) -%}
 {%- if slide.sourceType == "confluence" -%}
 <span class="badge badge-outline row gap-1" style="gap:0.2rem">{{ icon("file-text") }}Confluence</span>
+{%- endif -%}
+{%- endmacro %}
+
+{# 資料種別 (docCategory) badge: 分析結果 / 営業提案資料 を色分けして目立たせる。
+   その他・未設定は表示しない。link=True なら種別絞り込み検索へのリンクにする。 #}
+{% macro doc_category_badge(slide, link=True) -%}
+{%- set cat = slide.docCategory -%}
+{%- if cat in ("分析結果", "営業提案資料") -%}
+{%- set cls = "badge doccat-badge " ~ ("doccat-analysis" if cat == "分析結果" else "doccat-proposal") -%}
+{%- set ic = icon("bar-chart" if cat == "分析結果" else "presentation") -%}
+{%- if link -%}
+<a href="/?docCategory={{ cat | urlencode }}" class="{{ cls }}" title="「{{ cat }}」で絞り込む">{{ ic }}{{ cat }}</a>
+{%- else -%}
+<span class="{{ cls }}">{{ ic }}{{ cat }}</span>
+{%- endif -%}
 {%- endif -%}
 {%- endmacro %}
 
