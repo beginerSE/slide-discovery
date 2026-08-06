@@ -518,10 +518,39 @@ async def ui_admin_status(request: Request):
         return await _status_partial(request, len(files))
 
 
-def _files_partial(request: Request, files: list[dict], is_running: bool, **extra):
+async def _files_query(request: Request) -> str:
+    """登録済みファイルのファイル名絞り込みクエリ `fq`。GET はクエリ文字列、
+    POST（操作ボタンの hx-include）はフォームボディから読む。"""
+    fq = (request.query_params.get("fq") or "").strip()
+    if not fq and request.method == "POST":
+        form = await request.form()
+        fq = (form.get("fq") or "").strip()
+    return fq
+
+
+def _filter_files(files: list[dict], fq: str) -> list[dict]:
+    """ファイル名（表示名が無ければ Drive ID）で部分一致・大文字小文字無視。"""
+    if not fq:
+        return files
+    needle = fq.lower()
+    return [
+        f for f in files
+        if needle in ((f.get("fileName") or f.get("driveFileId") or "").lower())
+    ]
+
+
+def _files_partial(request: Request, files: list[dict], is_running: bool,
+                   fq: str = "", total: int | None = None, **extra):
     return templates.TemplateResponse(request, 
         "_admin_files.html",
-        {"request": request, "files": files, "is_running": is_running, **extra},
+        {
+            "request": request,
+            "files": files,
+            "is_running": is_running,
+            "fq": fq,
+            "files_total": len(files) if total is None else total,
+            **extra,
+        },
     )
 
 
@@ -534,7 +563,11 @@ async def ui_admin_files(request: Request):
         if err is not None:
             return err
         files = await _drive_files(session)
-        return _files_partial(request, files, await any_running())
+        fq = await _files_query(request)
+        return _files_partial(
+            request, _filter_files(files, fq), await any_running(),
+            fq=fq, total=len(files),
+        )
 
 
 @web_router.post("/ui/admin/tree", response_class=HTMLResponse)
@@ -1035,10 +1068,13 @@ async def ui_admin_retry(request: Request, drive_file_id: int):
             flash = exc.detail
             flash_error = True
         files = await _drive_files(session)
+        fq = await _files_query(request)
         return _files_partial(
             request,
-            files,
+            _filter_files(files, fq),
             await any_running(),
+            fq=fq,
+            total=len(files),
             flash=flash,
             flash_error=flash_error,
         )
@@ -1071,10 +1107,13 @@ async def ui_admin_regen_thumbnails(request: Request, drive_file_id: int):
             flash = exc.detail
             flash_error = True
         files = await _drive_files(session)
+        fq = await _files_query(request)
         return _files_partial(
             request,
-            files,
+            _filter_files(files, fq),
             await any_running(),
+            fq=fq,
+            total=len(files),
             flash=flash,
             flash_error=flash_error,
         )
@@ -1098,10 +1137,13 @@ async def ui_admin_delete(request: Request, drive_file_id: int):
             flash = exc.detail
             flash_error = True
         files = await _drive_files(session)
+        fq = await _files_query(request)
         return _files_partial(
             request,
-            files,
+            _filter_files(files, fq),
             await any_running(),
+            fq=fq,
+            total=len(files),
             flash=flash,
             flash_error=flash_error,
         )
