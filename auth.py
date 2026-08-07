@@ -8,6 +8,7 @@ import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import User, get_session
@@ -30,6 +31,19 @@ def _verify_password(plain: str, hashed: str) -> bool:
         return bcrypt.checkpw(pw, hashed.encode("utf-8"))
     except ValueError:
         return False
+
+
+def _reject_local_auth_in_iap_mode() -> None:
+    """IAP モードでは IAP が唯一の認証経路。ローカルの新規登録・パスワード
+    ログインを無効化し、IAP 未許可ユーザーがアカウントを作る/使う抜け道を
+    塞ぐ（本番は IAP が全リクエストを遮るが、多層防御として拒否する）。"""
+    import config
+
+    if config.iap_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="この環境では Google アカウントで自動的にログインされます",
+        )
 
 
 class RegisterBody(BaseModel):
@@ -56,14 +70,86 @@ class AuthResponse(BaseModel):
     user: AuthUser
 
 
+# bcrypt hashes never equal this sentinel, so IAP-provisioned accounts can
+# never be logged into with a password (_verify_password returns False).
+IAP_PASSWORD_SENTINEL = "!iap"
+
+
+async def _iap_auto_login(request: Request, session: AsyncSession) -> User | None:
+    """IAP モード時: 検証済みの Google アカウントメールに基づきユーザーを
+    取得（なければ自動作成）し、セッションを確立する。"""
+    from iap_auth import verified_iap_email
+
+    email = await verified_iap_email(request)
+    if not email:
+        return None
+    user = (
+        await session.execute(select(User).where(User.email == email))
+    ).scalar_one_or_none()
+    if user is None:
+        # 最初のユーザーを admin にする既存ルールは IAP 自動作成にも適用
+        # （IAP 専用の新規環境でも管理者が存在できるように）。
+        user_count = (await session.execute(select(func.count(User.id)))).scalar() or 0
+        user = User(
+            email=email,
+            password_hash=IAP_PASSWORD_SENTINEL,
+            display_name=email.split("@", 1)[0],
+            role="admin" if user_count == 0 else "user",
+        )
+        session.add(user)
+        try:
+            await session.commit()
+        except IntegrityError:
+            # 同時アクセスで同じメールが並行作成された場合は既存行を使う
+            await session.rollback()
+            user = (
+                await session.execute(select(User).where(User.email == email))
+            ).scalar_one_or_none()
+            if user is None:
+                return None
+        else:
+            await session.refresh(user)
+            log.info("IAP auto-provisioned user id=%s role=%s", user.id, user.role)
+    if hasattr(request, "session"):
+        request.session["user_id"] = user.id
+    return user
+
+
 async def _current_user_optional(
     request: Request, session: AsyncSession
 ) -> User | None:
+    import config as _config
+
     uid = request.session.get("user_id") if hasattr(request, "session") else None
-    if not uid:
+    user = await session.get(User, int(uid)) if uid else None
+
+    if not _config.iap_enabled():
+        return user
+
+    # IAP モードでは IAP が唯一の認証経路: セッションよりも IAP の検証済み
+    # アイデンティティを常に優先する。共有PCでの Google アカウント切替後に
+    # 旧ユーザーのセッションが生き残ったり、IAP を経ないリクエストが
+    # セッションだけで通ることを防ぐ（検証済みトークンは exp まで
+    # キャッシュされるため、リクエストごとの再検証コストはほぼゼロ）。
+    from iap_auth import verified_iap_email
+
+    email = await verified_iap_email(request)
+    if not email:
+        # 有効な IAP アサーションが無ければセッションがあっても未認証扱い
+        if user is not None and hasattr(request, "session"):
+            request.session.clear()
         return None
-    user = await session.get(User, int(uid))
-    return user
+    if user is not None and user.email == email:
+        return user
+    # セッションが無い、または IAP のアイデンティティと不一致 → IAP 側で確立
+    if user is not None:
+        log.info(
+            "IAP identity changed (session user id=%s -> %s); re-authenticating",
+            user.id, email,
+        )
+        if hasattr(request, "session"):
+            request.session.clear()
+    return await _iap_auto_login(request, session)
 
 
 async def current_user(
@@ -87,6 +173,7 @@ async def register(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ):
+    _reject_local_auth_in_iap_mode()
     email = body.email.strip().lower()
     if not EMAIL_RE.match(email):
         raise HTTPException(status_code=400, detail="メールアドレスの形式が不正です")
@@ -118,6 +205,7 @@ async def login(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ):
+    _reject_local_auth_in_iap_mode()
     email = body.email.strip().lower()
     user = (
         await session.execute(select(User).where(User.email == email))

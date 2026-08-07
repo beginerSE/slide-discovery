@@ -212,6 +212,23 @@ def use_drive_api() -> bool:
     return is_gcp()
 
 
+# --- Cloud IAP (Identity-Aware Proxy) ----------------------------------------
+
+def iap_audience() -> str | None:
+    """Expected audience of the IAP assertion JWT.
+
+    ``/projects/PROJECT_NUMBER/apps/PROJECT_ID`` (App Engine) or
+    ``/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID`` (backend
+    service, Cloud Run 経由). 設定されている場合のみ IAP 自動ログインが有効。
+    """
+    v = (os.environ.get("IAP_AUDIENCE") or "").strip()
+    return v or None
+
+
+def iap_enabled() -> bool:
+    return bool(iap_audience())
+
+
 # --- Confluence -------------------------------------------------------------
 
 def confluence_base_url() -> str | None:
@@ -302,6 +319,7 @@ def describe() -> dict:
         "drive": "drive_api" if use_drive_api() else "public_share_link",
         "thumbnails": "gcs" if use_gcs_thumbnails() else "local_disk",
         "confluence": "configured" if confluence_enabled() else "disabled",
+        "iapAuth": "enabled" if iap_enabled() else "disabled",
     }
 
 

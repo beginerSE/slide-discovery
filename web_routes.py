@@ -38,6 +38,29 @@ templates = Jinja2Templates(
     context_processors=[csrf_context],
 )
 
+
+def _static_version() -> str:
+    """CSS/JS のキャッシュバスター。ファイル更新時刻からプロセス起動時に
+    一度だけ算出し、`?v=` に付ける。デプロイ/再起動のたびに変わるので
+    ブラウザが古いスタイルを使い続ける問題を防ぐ。"""
+    latest = 0
+    static_dir = BASE_DIR / "static"
+    for p in static_dir.glob("*"):
+        try:
+            latest = max(latest, int(p.stat().st_mtime))
+        except OSError:
+            continue
+    return str(latest)
+
+
+templates.env.globals["static_version"] = _static_version()
+
+# IAP モード（環境変数は起動時に固定なので import 時評価で十分）。
+# ログアウトボタンの非表示などテンプレート分岐に使う。
+import config as _config  # noqa: E402
+
+templates.env.globals["iap_mode"] = _config.iap_enabled()
+
 _JST = timezone(timedelta(hours=9))
 
 
