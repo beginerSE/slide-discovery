@@ -5,9 +5,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{% block title %}社内スライド検索{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}" />
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}?v={{ static_version }}" />
   <script src="{{ url_for('static', path='htmx.min.js') }}" defer></script>
-  <script src="{{ url_for('static', path='app.js') }}" defer></script>
+  <script src="{{ url_for('static', path='app.js') }}?v={{ static_version }}" defer></script>
 </head>
 <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   <div class="app">
@@ -41,10 +41,14 @@
             <div class="user-name">{{ user.displayName or user.email }}</div>
             <div class="user-role">{{ "管理者" if user.role == 'admin' else "一般ユーザー" }}</div>
           </div>
+          {# IAP モードでは IAP セッションが続く限り即再ログインされるため、
+             紛らわしいアプリ内ログアウトボタンは出さない #}
+          {% if not iap_mode %}
           <form method="post" action="/logout">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
             <button class="btn btn-ghost btn-icon" title="ログアウト" type="submit">{{ m.icon("log-out") }}</button>
           </form>
+          {% endif %}
         </div>
         {% else %}
         <a href="/login" class="nav-item">{{ m.icon("log-in") }}<span>ログイン</span></a>
