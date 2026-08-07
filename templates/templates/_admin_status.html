@@ -1,0 +1,9 @@
+{% import "_macros.html" as m %}
+<button class="btn btn-lg" hx-post="/ui/admin/run" hx-target="#admin-run" hx-swap="innerHTML"
+  {% if manual_running or files_count == 0 %}disabled{% endif %}>
+  {% if manual_running %}{{ m.icon("loader", "spin") }}{% else %}{{ m.icon("play") }}{% endif %}今すぐ全件取り込み
+</button>
+
+<div id="admin-jobs" hx-swap-oob="true">
+  {% include "_admin_jobs.html" %}
+</div>

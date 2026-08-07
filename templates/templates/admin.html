@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}取り込み管理 — 社内スライド検索{% endblock %}
+{% block content %}
+<div class="stack wrap-6xl" style="gap:1.5rem">
+  <div class="row between" style="align-items:flex-start;gap:1rem">
+    <div>
+      <h1 class="row gap-2" style="font-size:1.5rem;font-weight:700">{{ m.icon("cloud", "icon-lg") }}取り込み管理</h1>
+      <p class="text-sm text-muted mt-1" style="max-width:46rem">Google Drive の共有リンク（「リンクを知っている全員が閲覧可」）を貼り付けて取り込みます。1時間ごとに自動で再チェックされます。</p>
+    </div>
+    <div id="admin-run" class="shrink-0" hx-get="/ui/admin/status" hx-trigger="load, every 2s" hx-swap="innerHTML">
+      {% include "_admin_status.html" %}
+    </div>
+  </div>
+
+  <div id="admin-jobs">{% include "_admin_jobs.html" %}</div>
+  <div id="admin-flash"></div>
+
+  <div class="card">
+    <div class="card-header"><div class="text-base font-semibold">共有リンクを追加</div></div>
+    <div class="card-body">
+      <form hx-post="/ui/admin/add" hx-target="#admin-conflicts" hx-swap="innerHTML" class="space-y-sm"
+        hx-disabled-elt="find button[type='submit']"
+        hx-on::after-request="if(event.detail.successful) this.reset()">
+        <textarea class="textarea mono" name="text" rows="5" placeholder="https://drive.google.com/file/d/XXXXXXXX/view&#10;https://drive.google.com/open?id=YYYYYYYY&#10;ZZZZZZZZ（ファイルIDのみでも可）"></textarea>
+        <div class="row between" style="align-items:center">
+          <div class="add-progress row gap-2 text-sm text-muted"><span class="spinner"></span>追加処理中です。フォルダ内のファイル数によっては時間がかかります…</div>
+          <button type="submit" class="btn">{{ m.icon("plus") }}リンクを登録</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="admin-conflicts"></div>
+
+  <div class="card">
+    <div class="card-header"><div class="text-base font-semibold">フォルダ構成の確認</div></div>
+    <div class="card-body">
+      <p class="text-sm text-muted" style="margin-bottom:.5rem">Drive フォルダの共有リンクを貼り付けると、サブフォルダを含む階層と、各ファイルの取り込み状況（取り込み済み／未取り込み／未登録）を一覧できます。</p>
+      <form hx-post="/ui/admin/tree" hx-target="#admin-tree" hx-swap="innerHTML" class="space-y-sm"
+        hx-disabled-elt="find button[type='submit']">
+        <input class="input mono" name="folder" placeholder="https://drive.google.com/drive/folders/XXXXXXXX">
+        <div class="row between" style="align-items:center">
+          <div class="add-progress row gap-2 text-sm text-muted"><span class="spinner"></span>フォルダ構成を取得中です。階層やファイル数によっては時間がかかります…</div>
+          <button type="submit" class="btn btn-outline">{{ m.icon("folder") }}構成を確認</button>
+        </div>
+      </form>
+      <div id="admin-tree"></div>
+    </div>
+  </div>
+
+  <div id="admin-confluence" hx-get="/ui/admin/confluence" hx-trigger="load" hx-swap="innerHTML">
+    <div class="card"><div class="card-body text-sm text-muted">Confluence 連携を確認中…</div></div>
+  </div>
+
+  {# ファイル名絞り込み。入力欄はポーリングで差し替わる #admin-files の外に
+     置いて、5秒ごとの自動更新でも入力中のフォーカス・値を失わないようにする。
+     hx-include で fq が自動更新リクエストにも引き継がれる。 #}
+  <div class="search-box">
+    {{ m.icon("search", "search-icon") }}
+    <input class="input" type="text" id="admin-files-q" name="fq" placeholder="登録済みファイルをファイル名で絞り込み" autocomplete="off"
+      hx-get="/ui/admin/files" hx-target="#admin-files" hx-swap="innerHTML"
+      hx-trigger="input changed delay:300ms, keyup[key=='Enter']" />
+  </div>
+  <div id="admin-files" hx-get="/ui/admin/files" hx-trigger="load, every 5s, refreshAdminFiles from:body" hx-swap="innerHTML"
+       hx-include="#admin-files-q">
+    {% include "_admin_files.html" %}
+  </div>
+</div>
+{% endblock %}

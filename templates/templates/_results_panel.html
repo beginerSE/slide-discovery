@@ -1,0 +1,39 @@
+{% import "_macros.html" as m %}
+{% if not has_active %}
+  <div class="space-y-lg">
+    <div class="stat-grid">
+      <div class="card stat-card primary">
+        <div class="label">総スライド数</div>
+        <div class="value">{{ "{:,}".format(stats.totalSlides) }}</div>
+      </div>
+      <div class="card stat-card">
+        <div class="label">ファイル数</div>
+        <div class="value">{{ "{:,}".format(stats.totalFiles) }}</div>
+      </div>
+    </div>
+    <div class="space-y">
+      <h2 class="section-title">{{ m.icon("calendar", "icon-lg") }}最近追加されたスライド</h2>
+      <div class="slide-grid">
+        {% for slide in stats.recentSlides %}{% include "_slide_card.html" %}{% endfor %}
+      </div>
+    </div>
+  </div>
+{% else %}
+  <div class="space-y">
+    <div class="result-count"><strong>{{ total }}</strong> 件のスライドが見つかりました</div>
+    {% if items|length == 0 %}
+    <div class="empty-state">
+      <div class="circle">{{ m.icon("search", "icon-lg") }}</div>
+      <p class="font-medium" style="font-size:1.05rem">条件に一致するスライドが見つかりませんでした</p>
+      <p class="text-muted text-sm mt-2">検索キーワードを変更するか、フィルターの条件を緩めて再度お試しください。</p>
+      <button type="button" class="btn btn-outline mt-4" hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
+        hx-include="[name='mode']"
+        hx-on:click="var el=document.querySelector('input[name=q]'); if(el) el.value='';">条件をクリア</button>
+    </div>
+    {% else %}
+    <div class="slide-grid">
+      {% for slide in items %}{% set highlight = has_query %}{% include "_slide_card.html" %}{% endfor %}
+    </div>
+    {% endif %}
+  </div>
+{% endif %}

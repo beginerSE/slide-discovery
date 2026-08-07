@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}ガイド編集 — 社内スライド検索{% endblock %}
+{% block content %}
+<div class="stack wrap-6xl" style="gap:1.5rem">
+  <div>
+    <h1 class="row gap-2" style="font-size:1.5rem;font-weight:700">{{ m.icon("pencil", "icon-lg") }}ガイド編集</h1>
+    <p class="text-sm text-muted mt-1" style="max-width:46rem">使い方ガイドの内容を Markdown で編集できます。保存すると全ユーザーの「使い方ガイド」に反映されます。</p>
+  </div>
+
+  <div class="card">
+    <form method="post" action="/admin/guide" class="card-body stack" style="gap:1rem">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <textarea name="content" class="input guide-editor" spellcheck="false">{{ guide_markdown }}</textarea>
+      <details class="text-xs text-muted">
+        <summary style="cursor:pointer">Markdown の書き方（かんたん）</summary>
+        <ul style="margin:0.4rem 0 0;padding-left:1.1rem;display:flex;flex-direction:column;gap:0.2rem">
+          <li><code># 見出し</code> / <code>## 小見出し</code></li>
+          <li><code>- 箇条書き</code> / <code>1. 番号付き</code></li>
+          <li><code>**太字**</code> / <code>*斜体*</code></li>
+          <li><code>[リンク文字](https://example.com)</code></li>
+          <li>表は <code>| 列1 | 列2 |</code> の行で作成できます</li>
+        </ul>
+      </details>
+      <div class="row gap-2">
+        <button type="submit" class="btn btn-primary">{{ m.icon("save") }}保存する</button>
+        <a href="/guide" class="btn btn-outline">{{ m.icon("eye") }}プレビュー（表示画面）</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

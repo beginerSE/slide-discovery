@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}使い方ガイド — 社内スライド検索{% endblock %}
+{% block content %}
+<div class="stack wrap-6xl" style="gap:1.5rem">
+  <div class="row between wrap gap-2">
+    <div>
+      <h1 class="row gap-2" style="font-size:1.5rem;font-weight:700">{{ m.icon("file-text", "icon-lg") }}使い方ガイド</h1>
+      <p class="text-sm text-muted mt-1" style="max-width:46rem">このツールの使い方をまとめています。はじめての方はこちらをご覧ください。</p>
+    </div>
+    {% if user and user.role == 'admin' %}
+    <a href="/admin/guide" class="btn btn-outline btn-sm">{{ m.icon("pencil") }}編集</a>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <div class="markdown-body">{{ guide_html | safe }}</div>
+    </div>
+  </div>
+</div>
+{% endblock %}

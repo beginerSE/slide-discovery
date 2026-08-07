@@ -1,0 +1,34 @@
+{% import "_macros.html" as m %}
+<div class="card">
+  <div class="card-header">
+    <div class="text-base font-semibold row gap-2">{{ m.icon("file-text") }}<span>Confluence ページを取り込む</span></div>
+  </div>
+  <div class="card-body">
+    {% if not confluence_enabled %}
+    <div class="alert alert-error">
+      Confluence 連携が未設定です。<a href="/admin/site">サイト管理</a> で サイト URL / メール / API トークン を保存してください。
+    </div>
+    {% elif error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% elif not spaces %}
+    <div class="text-sm text-muted">取り込める Confluence スペースが見つかりませんでした。</div>
+    {% else %}
+    <p class="text-sm text-muted mb-2" style="max-width:46rem">
+      選択したスペースの全ページを取り込みます。1ページ = 1件として検索対象になります。
+      （変更がないページは再取り込み時にスキップされます）
+      接続情報の変更は <a href="/admin/site">サイト管理</a> から行えます。
+    </p>
+    <form hx-post="/ui/admin/confluence/run" hx-target="#admin-run" hx-swap="innerHTML" class="row gap-2 wrap" style="align-items:flex-end">
+      <label class="stack" style="gap:0.25rem;flex:1;min-width:16rem">
+        <span class="text-xs text-muted">スペース</span>
+        <select class="input" name="space_id" required>
+          {% for s in spaces %}
+          <option value="{{ s.id }}">{{ s.name }}{% if s.key %}（{{ s.key }}）{% endif %}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit" class="btn shrink-0">{{ m.icon("play") }}このスペースを取り込む</button>
+    </form>
+    {% endif %}
+  </div>
+</div>

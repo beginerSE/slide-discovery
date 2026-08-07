@@ -1,0 +1,46 @@
+{% import "_macros.html" as m %}
+{%- macro toggled(facets, field, value) -%}
+{%- set ns = namespace(d={}) -%}
+{%- for k, val in facets.items() if val -%}{%- set _ = ns.d.update({k: val}) -%}{%- endfor -%}
+{%- if facets.get(field) == value -%}{%- set _ = ns.d.pop(field, None) -%}
+{%- else -%}{%- set _ = ns.d.update({field: value}) -%}{%- endif -%}
+{{- ns.d | tojson -}}
+{%- endmacro -%}
+{%- macro facet_group(m, facets, field, options, ico, label, scroll=false) -%}
+{%- if options -%}
+<div>
+  <div class="facet-group-label">{{ m.icon(ico) }}<span>{{ label }}</span><span class="facet-count">{{ options | length }}</span></div>
+  <div class="chips{% if scroll %} chips-scroll{% endif %}">
+    {% for opt in options %}
+    <button type="button" class="chip {% if facets.get(field) == opt.value %}active{% endif %}"
+      hx-get="/ui/search" hx-vals='{{ toggled(facets, field, opt.value) }}'
+      hx-include="[name='q'], [name='mode'], [name='source']" hx-target="#facet-panel" hx-swap="innerHTML">
+      <span>{{ opt.value }}</span><span class="count">{{ opt.count }}</span>
+    </button>
+    {% endfor %}
+  </div>
+</div>
+{%- endif -%}
+{%- endmacro -%}
+
+<div id="facet-state" style="display:none">
+  {% for k, v in facets.items() if v %}<input type="hidden" name="{{ k }}" value="{{ v }}" />{% endfor %}
+</div>
+
+<div class="row between mb-2">
+  <h3 class="text-sm font-medium row gap-2" style="gap:0.5rem">{{ m.icon("layers") }}絞り込み</h3>
+  {% if has_active %}
+  <button type="button" class="btn btn-ghost btn-sm" hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
+    hx-include="[name='mode'], [name='source']"
+    hx-on:click="var el=document.querySelector('input[name=q]'); if(el) el.value='';">条件をクリア</button>
+  {% endif %}
+</div>
+
+<div class="facet-grid">
+  {{ facet_group(m, facets, "industry", filters.industries, "briefcase", "業界") }}
+  {{ facet_group(m, facets, "client", filters.clients, "building", "クライアント先") }}
+  {{ facet_group(m, facets, "proposalType", filters.proposalTypes, "layout", "スライド種別") }}
+  {{ facet_group(m, facets, "graphType", filters.graphTypes, "bar-chart", "グラフ") }}
+  {{ facet_group(m, facets, "docCategory", filters.docCategories, "tag", "資料種別") }}
+  {{ facet_group(m, facets, "tag", filters.tags, "layers", "タグ", scroll=true) }}
+</div>
