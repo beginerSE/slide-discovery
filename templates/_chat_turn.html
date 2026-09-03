@@ -57,6 +57,12 @@
               {{ m.icon("external-link") }}{% if s.sourceType == "confluence" %}ページを開く{% else %}資料を開く（p.{{ s.pageNo }}）{% endif %}
             </a>
             {% endif %}
+             {% if s.sourceType != "confluence" and (s.folderUrl or s.folderId) %}
+             {% set folder_url = s.folderUrl or ("https://drive.google.com/drive/folders/" ~ s.folderId) %}
+             <a href="{{ folder_url }}" class="chat-source-folder" target="_blank" rel="noopener noreferrer" title="{{ (s.folderName or '親フォルダ') }} を Drive で開く">
+               {{ m.icon("folder") }}<span>{{ s.folderName or "親フォルダ" }}</span>{{ m.icon("external-link") }}
+             </a>
+             {% endif %}
           </div>
           {% endfor %}
         </div>

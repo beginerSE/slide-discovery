@@ -9,7 +9,7 @@
   <script src="{{ url_for('static', path='htmx.min.js') }}" defer></script>
   <script src="{{ url_for('static', path='app.js') }}?v={{ static_version }}" defer></script>
 </head>
-<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+<body class="{% block body_class %}{% endblock %}" hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   <div class="app">
     <aside class="sidebar">
       <div class="sidebar-header">
@@ -61,7 +61,7 @@
         <span>社内スライド検索</span>
         <span class="text-muted text-sm" style="margin-left:.75rem">AIが社内のスライド資料を横断・詳細に検索</span>
       </header>
-      <main class="content">
+      <main class="content {% block content_class %}{% endblock %}">
         {% block content %}{% endblock %}
       </main>
     </div>

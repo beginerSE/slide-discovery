@@ -36,6 +36,10 @@
           </div>
           <div class="file-meta">
             <a href="{{ f.shareUrl }}" target="_blank" rel="noopener noreferrer" class="row gap-2">{{ m.icon("external-link") }}Drive で開く</a>
+             {% if f.folderUrl or f.folderId %}
+             {% set folder_url = f.folderUrl or ("https://drive.google.com/drive/folders/" ~ f.folderId) %}
+             <a href="{{ folder_url }}" target="_blank" rel="noopener noreferrer" class="row gap-2 file-folder-link" title="{{ (f.folderName or '親フォルダ') }} を Drive で開く">{{ m.icon("folder") }}親フォルダ: {{ f.folderName or "親フォルダ" }}</a>
+             {% endif %}
             {% if f.lastIngestedAt %}<span>最終取込: {{ f.lastIngestedAt[:16] | replace("T", " ") | replace("-", "/") }}</span>{% endif %}
             <span class="mono" style="opacity:0.7">{{ f.driveFileId }}</span>
           </div>

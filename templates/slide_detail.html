@@ -16,9 +16,15 @@
         {% if slide.layoutType %}<span class="badge badge-outline">{{ slide.layoutType }}</span>{% endif %}
       </div>
     </div>
-    {% if slide.sourceUrl %}
-    <a href="{{ slide.sourceUrl }}" target="_blank" rel="noopener noreferrer" class="btn shrink-0">{{ m.icon("external-link") }}{% if slide.sourceType == "confluence" %}Confluence で開く{% else %}元資料を開く{% endif %}</a>
-    {% endif %}
+    <div class="detail-actions">
+      {% if slide.sourceUrl %}
+      <a href="{{ slide.sourceUrl }}" target="_blank" rel="noopener noreferrer" class="btn shrink-0">{{ m.icon("external-link") }}{% if slide.sourceType == "confluence" %}Confluence で開く{% else %}元資料を開く{% endif %}</a>
+      {% endif %}
+      {% if slide.sourceType != "confluence" and (slide.folderUrl or slide.folderId) %}
+      {% set folder_url = slide.folderUrl or ("https://drive.google.com/drive/folders/" ~ slide.folderId) %}
+      <a href="{{ folder_url }}" target="_blank" rel="noopener noreferrer" class="btn btn-outline shrink-0" title="{{ (slide.folderName or '親フォルダ') }} を Drive で開く">{{ m.icon("folder") }}親フォルダを開く</a>
+      {% endif %}
+    </div>
   </div>
 
   <div class="detail-grid">
@@ -48,6 +54,7 @@
         <div class="card-header"><div class="text-sm font-bold">基本情報</div></div>
         <div>
           <div class="info-row"><span class="k">{{ m.icon("file-text") }}ファイル名</span><span class="v" title="{{ slide.fileName }}">{{ slide.fileName }}</span></div>
+           {% if slide.sourceType != "confluence" and (slide.folderUrl or slide.folderId) %}<div class="info-row"><span class="k">{{ m.icon("folder") }}親フォルダ</span><span class="v" title="{{ slide.folderName or '親フォルダ' }}">{{ slide.folderName or "親フォルダ" }}</span></div>{% endif %}
           {% if slide.client %}<div class="info-row"><span class="k">{{ m.icon("building") }}クライアント先</span><span class="v" title="{{ slide.client }}">{{ slide.client }}</span></div>{% endif %}
           <div class="info-row"><span class="k">{{ m.icon("layers") }}出どころ</span><span class="v">{% if slide.sourceType == "confluence" %}Confluence ページ{% else %}提案スライド（PowerPoint）{% endif %}</span></div>
           {% if slide.sourceType != "confluence" %}<div class="info-row"><span class="k">{{ m.icon("presentation") }}ページ</span><span class="v">p.{{ slide.pageNo }}</span></div>{% endif %}

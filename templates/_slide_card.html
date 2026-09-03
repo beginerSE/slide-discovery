@@ -18,6 +18,11 @@
   <div class="slide-card-body">
     <h3 class="slide-card-title">{{ slide.slideTitle or "無題のスライド" }}</h3>
     <div class="slide-file">{{ m.icon("file-text") }}<span title="{{ slide.fileName }}">{{ slide.fileName }}</span></div>
+    {% if slide.sourceType != "confluence" and (slide.folderUrl or slide.folderId) %}
+    {% set folder_url = slide.folderUrl or ("https://drive.google.com/drive/folders/" ~ slide.folderId) %}
+    <a href="{{ folder_url }}" class="card-folder-open" target="_blank" rel="noopener noreferrer"
+       title="{{ (slide.folderName or '親フォルダ') }} を Drive で開く">{{ m.icon("folder") }}<span>{{ slide.folderName or "親フォルダ" }}</span>{{ m.icon("external-link") }}</a>
+    {% endif %}
     <div class="row wrap" style="gap:0.25rem">
       {{ m.doc_category_badge(slide) }}
       {{ m.source_badge(slide) }}
