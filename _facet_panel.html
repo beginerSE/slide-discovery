@@ -1,0 +1,44 @@
+{% import "_macros.html" as m %}
+{%- macro facet_group(m, facets, field, options, ico, label, scroll=false) -%}
+{%- if options -%}
+<div>
+  <div class="facet-group-label">{{ m.icon(ico) }}<span>{{ label }}</span><span class="facet-count">{{ options | length }}</span></div>
+  <div class="chips{% if scroll %} chips-scroll{% endif %}">
+    {% for opt in options %}
+    <button type="button" class="chip {% if facets.get(field) == opt.value %}active{% endif %}"
+      data-facet-field="{{ field }}" data-facet-value="{{ opt.value }}"
+      aria-pressed="{{ 'true' if facets.get(field) == opt.value else 'false' }}"
+      hx-get="/ui/search"
+      hx-include="[name='q'], #facet-state, [name='mode'], [name='source']"
+      hx-target="#facet-content" hx-swap="innerHTML">
+      <span>{{ opt.value }}</span><span class="count">{{ opt.count }}</span>
+    </button>
+    {% endfor %}
+  </div>
+</div>
+{%- endif -%}
+{%- endmacro -%}
+
+<div id="facet-state" style="display:none">
+  {% for k, v in facets.items() if v %}<input type="hidden" name="{{ k }}" value="{{ v }}" />{% endfor %}
+</div>
+
+<div class="row between mb-2 facet-heading">
+  <h3 class="text-sm font-medium row gap-2" style="gap:0.5rem">{{ m.icon("layers") }}絞り込み</h3>
+  {% if has_active %}
+  <button type="button" class="btn btn-ghost btn-sm" data-search-clear
+    hx-get="/ui/search" hx-target="#facet-content" hx-swap="innerHTML"
+    hx-include="[name='q'], #facet-state, [name='mode'], [name='source']">
+    条件をクリア
+  </button>
+  {% endif %}
+</div>
+
+<div class="facet-grid">
+  {{ facet_group(m, facets, "industry", filters.industries, "briefcase", "業界") }}
+  {{ facet_group(m, facets, "client", filters.clients, "building", "クライアント先") }}
+  {{ facet_group(m, facets, "proposalType", filters.proposalTypes, "layout", "スライド種別") }}
+  {{ facet_group(m, facets, "graphType", filters.graphTypes, "bar-chart", "グラフ") }}
+  {{ facet_group(m, facets, "docCategory", filters.docCategories, "tag", "資料種別") }}
+  {{ facet_group(m, facets, "tag", filters.tags, "layers", "タグ", scroll=true) }}
+</div>

@@ -1,0 +1,75 @@
+{% import "_macros.html" as m %}
+<div class="chat-turn">
+  <div class="chat-bubble chat-user">
+    <div class="chat-avatar chat-avatar-user">{{ m.icon("user", "icon") }}</div>
+    <div class="chat-bubble-body">{{ question }}</div>
+  </div>
+
+  <div class="chat-bubble chat-ai">
+    <div class="chat-avatar chat-avatar-ai">{{ m.icon("sparkles", "icon") }}</div>
+    <div class="chat-bubble-body">
+      {% if degraded %}
+      <div class="alert alert-error">
+        AIによる回答の生成に失敗しました。下の参考スライドをご確認ください。
+        （GEMINI_API_KEY が未設定の可能性があります）
+      </div>
+      {% elif answer %}
+      <div class="chat-answer">{{ answer }}</div>
+      {% else %}
+      <div class="text-sm text-muted">回答を生成できませんでした。</div>
+      {% endif %}
+
+      {% if series_count %}
+      <div class="chat-series-used text-sm text-muted">
+        {{ m.icon("calendar") }}定例シリーズ「{{ series_name or "（フォルダ）" }}」の直近{{ series_count }}回分の流れを参照しました。
+      </div>
+      {% endif %}
+
+      {% if sources %}
+      <div class="chat-sources">
+        <div class="chat-sources-label">{{ m.icon("layers") }}参考スライド（{{ sources|length }}件）</div>
+        <div class="chat-source-grid">
+          {% for s in sources %}
+          <div class="chat-source-card">
+            <div class="chat-source-main">
+              <a href="/slides/{{ s.slideId }}" class="chat-source-thumb">
+                {% if s.thumbnailPath %}
+                <img src="{{ s.thumbnailPath }}" alt="{{ s.slideTitle }}" loading="lazy" />
+                {% else %}
+                <div class="chat-source-noimg">{{ m.source_fallback_icon(s) }}</div>
+                {% endif %}
+                {% if s.sourceType != "confluence" %}<span class="chat-source-page">p.{{ s.pageNo }}</span>{% endif %}
+              </a>
+              <div class="chat-source-meta">
+                {% if s.sourceUrl %}
+                <a href="{{ s.sourceUrl }}" class="chat-source-file chat-source-file-link" title="{{ s.fileName }} を開く" target="_blank" rel="noopener noreferrer">
+                  {{ m.icon("file-text") }}<span class="chat-source-file-name">{{ s.fileName }}</span>{{ m.icon("external-link") }}
+                </a>
+                {% else %}
+                <div class="chat-source-file" title="{{ s.fileName }}">{{ m.icon("file-text") }}{{ s.fileName }}</div>
+                {% endif %}
+                <a href="/slides/{{ s.slideId }}" class="chat-source-ttl">{{ s.slideTitle or "無題のスライド" }}</a>
+                {{ m.doc_category_badge(s, link=False) }}
+              </div>
+            </div>
+            {% if s.sourceUrl %}
+            <a href="{{ s.sourceUrl }}" class="chat-source-open" target="_blank" rel="noopener noreferrer">
+              {{ m.icon("external-link") }}{% if s.sourceType == "confluence" %}ページを開く{% else %}資料を開く（p.{{ s.pageNo }}）{% endif %}
+            </a>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% if created_at is defined and created_at %}
+  <time class="chat-turn-time" datetime="{{ created_at }}">
+    {{ created_at | jst("%Y/%m/%d %H:%M") }}
+  </time>
+  {% endif %}
+</div>
+{% if next_request_id is defined and next_request_id %}
+<input type="hidden" id="chat-request-id" name="requestId" value="{{ next_request_id }}" hx-swap-oob="outerHTML" />
+{% endif %}

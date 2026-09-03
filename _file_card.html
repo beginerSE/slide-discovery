@@ -1,0 +1,49 @@
+{% import "_macros.html" as m %}
+{%- macro mixed() -%}<span class="badge badge-amber">{{ m.icon("alert") }}混在</span>{%- endmacro -%}
+<div class="card" id="file-card-{{ file.fileId }}">
+  <form hx-post="/ui/admin/files/{{ file.fileId }}" hx-target="#file-card-{{ file.fileId }}" hx-swap="outerHTML">
+    <div class="card-header">
+      <div class="text-sm font-semibold truncate" title="{{ file.fileName }}">{{ file.fileName or "（ファイル名なし）" }}</div>
+      <p class="text-xs text-muted row gap-2 mt-1">{{ m.icon("layers") }}{{ file.slideCount }} 枚のスライド</p>
+    </div>
+    <div class="card-body space-y">
+      {% if saved %}<div class="alert alert-success">{{ updated }} 枚のスライドに適用しました。検索インデックスは次回のバックグラウンド処理で更新されます。</div>{% endif %}
+      {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+      <div class="three-col">
+        <div class="field">
+          <div class="row gap-2 mb-2"><label class="field-label">業界</label>{% if file.industryMixed %}{{ mixed() }}{% endif %}</div>
+          <input class="input" name="industry" value="{{ file.industry }}" placeholder="{{ '（混在 → 統一する）' if file.industryMixed else '例: 金融' }}" />
+        </div>
+        <div class="field">
+          <div class="row gap-2 mb-2"><label class="field-label">クライアント先</label>{% if file.clientMixed %}{{ mixed() }}{% endif %}</div>
+          <input class="input" name="client" value="{{ file.client }}" placeholder="{{ '（混在 → 統一する）' if file.clientMixed else '例: 株式会社〇〇' }}" />
+        </div>
+        <div class="field">
+          <div class="row gap-2 mb-2"><label class="field-label">スライド種別</label>{% if file.proposalTypeMixed %}{{ mixed() }}{% endif %}</div>
+          <input class="input" name="proposalType" value="{{ file.proposalType }}" placeholder="{{ '（混在 → 統一する）' if file.proposalTypeMixed else '例: 新規提案' }}" />
+        </div>
+        <div class="field">
+          <div class="row gap-2 mb-2"><label class="field-label">資料種別</label>{% if file.docCategoryMixed %}{{ mixed() }}{% endif %}</div>
+          <input class="input" name="docCategory" value="{{ file.docCategory }}" placeholder="{{ '（混在 → 統一する）' if file.docCategoryMixed else '分析結果 / 営業提案資料 / その他' }}" />
+        </div>
+      </div>
+
+      <div class="field" data-tag-editor data-tags='{{ file.tags | tojson }}'>
+        <div class="row gap-2 mb-2"><label class="field-label">タグ</label>{% if file.tagsMixed %}{{ mixed() }}{% endif %}</div>
+        <input type="hidden" name="tags" data-tag-hidden value="{{ file.tags | join('\n') }}" />
+        <div class="tag-box" data-tag-box></div>
+        <div class="row gap-2 mt-2">
+          <input class="input" data-tag-input placeholder="タグを入力してEnter" />
+          <button type="button" class="btn btn-outline" data-tag-add>追加</button>
+        </div>
+      </div>
+
+      <div class="row between wrap gap-2">
+        <div class="text-xs text-muted">保存すると同じファイルの全スライドに一括適用されます</div>
+        <div class="row gap-2">
+          <button type="submit" class="btn btn-sm">{{ m.icon("save") }}全スライドに適用</button>
+        </div>
+      </div>
+    </div>
+  </form>
+</div>

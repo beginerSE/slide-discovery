@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+<div class="chat-workspace">
+  <aside class="chat-history" aria-label="会話履歴">
+    <div class="chat-history-head">
+      <div>
+        <p class="chat-eyebrow">対話検索</p>
+        <h1 class="chat-history-title">会話履歴</h1>
+      </div>
+      <a href="/chat" class="btn btn-sm chat-new-conversation" aria-label="新しい会話を開始">
+        {{ m.icon("plus") }}<span>新規</span>
+      </a>
+    </div>
+    <nav class="chat-history-list" aria-label="保存済みの会話">
+      {% for conversation in conversations %}
+      <a href="/chat?conversation={{ conversation.id }}" class="chat-history-item {% if conversation.isActive %}is-active{% endif %}" {% if conversation.isActive %}aria-current="page"{% endif %}>
+        <span class="chat-history-item-icon">{{ m.icon("message-circle") }}</span>
+        <span class="chat-history-item-copy">
+          <span class="chat-history-item-title">{{ conversation.title or "新しい会話" }}</span>
+          <span class="chat-history-item-meta">{{ conversation.turnCount }}件の質問{% if conversation.updatedAt %} · {{ conversation.updatedAt | jst("%m/%d %H:%M") }}{% endif %}</span>
+        </span>
+      </a>
+      {% else %}
+      <div class="chat-history-empty">
+        {{ m.icon("message-circle", "icon-lg") }}
+        <p>会話履歴はまだありません</p>
+        <span>質問すると、ここから再開できます。</span>
+      </div>
+      {% endfor %}
+    </nav>
+    <p class="chat-history-foot">会話はアカウントごとに保存されます</p>
+  </aside>
+
+  <section class="chat-page" aria-label="対話検索">
+    <header class="chat-conversation-head">
+      <div class="chat-conversation-heading">
+        <p class="chat-eyebrow">{% if active_conversation %}保存済みの会話{% else %}新しい会話{% endif %}</p>
+        <h2 class="chat-title">{% if active_conversation %}{{ active_conversation.title or "新しい会話" }}{% else %}資料について質問する{% endif %}</h2>
+        {% if not active_conversation %}
+        <p class="chat-sub">社内資料を横断して探し、回答の根拠となる資料とページを添えてお答えします。</p>
+        {% endif %}
+      </div>
+      {% if active_conversation %}
+      <form method="post" action="/ui/chat/conversations/{{ active_conversation.id }}/delete" class="chat-delete-form" data-chat-delete>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <button type="submit" class="btn btn-ghost btn-sm chat-delete" aria-label="この会話を削除">
+          {{ m.icon("trash-2") }}<span>削除</span>
+        </button>
+      </form>
+      {% endif %}
+    </header>
+
+    {% if not active_conversation %}
+    <div class="chat-examples" aria-label="質問の例">
+      <span class="chat-example-label">質問の例</span>
+      <button type="button" class="chat-chip" data-chat-fill>クラスタリングの分析結果を報告した資料はある？</button>
+      <button type="button" class="chat-chip" data-chat-fill>新規事業の提案で使えるロードマップのスライドを探して</button>
+      <button type="button" class="chat-chip" data-chat-fill>金融業界向けのDX提案はどれ？</button>
+    </div>
+    {% endif %}
+
+    <div id="chat-thread" class="chat-thread" aria-live="polite">
+      {% for turn in turns %}
+        {% with question=turn.question, answer=turn.answer, sources=turn.sources, degraded=turn.degraded, series_name=turn.seriesName, series_count=turn.seriesCount, created_at=turn.createdAt %}
+          {% include "_chat_turn.html" %}
+        {% endwith %}
+      {% endfor %}
+    </div>
+
+    <form id="chat-form" class="chat-composer" hx-post="/ui/chat" hx-target="#chat-thread"
+          hx-swap="beforeend" hx-disabled-elt="find .chat-send">
+    <input type="hidden" name="conversationId" value="{{ active_conversation.id if active_conversation else '' }}" />
+    <input type="hidden" id="chat-request-id" name="requestId" value="{{ request_id }}" />
+    {% if series_options or has_confluence %}
+    {# 詳細設定（定例シリーズ・検索対象）は普段は自動判定/全対象のままで
+       良いので折りたたみ、入力欄を主役にする。デフォルト以外の設定中は
+       ボタンに「変更あり」バッジを出す（static/app.js が制御）。 #}
+    <div id="chat-advanced" class="chat-advanced" hidden>
+      {% if series_options %}
+      <div class="chat-series-field">
+        <label class="chat-series row gap-2 text-sm">
+          <span class="text-muted">定例シリーズ</span>
+          <select class="input" name="seriesId">
+            <option value="">自動判定</option>
+            {% for s in series_options %}
+            <option value="{{ s.id }}">{{ s.name }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <p class="chat-series-hint">
+          {{ m.icon("calendar") }}<span>定例会議など<strong>定期的に更新される資料</strong>を一つの「シリーズ」としてまとめ、<strong>直近の開催回の流れ</strong>を踏まえて回答します（例：「前回からの変化」「最近の進捗」）。通常は<strong>自動判定</strong>のままでOK。特定のシリーズに絞りたいときだけ選んでください。</span>
+        </p>
+      </div>
+      {% endif %}
+      {% if has_confluence %}
+      <div class="source-toggle" role="group" aria-label="検索対象">
+        <span class="source-toggle-label">{{ m.icon("layers") }}検索対象</span>
+        <label class="source-option">
+          <input type="checkbox" name="source" value="pptx" checked />
+          <span>{{ m.icon("presentation") }}パワポ</span>
+        </label>
+        <label class="source-option">
+          <input type="checkbox" name="source" value="confluence" checked />
+          <span>{{ m.icon("file-text") }}Confluence</span>
+        </label>
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+    <div class="chat-input-row">
+      {% if series_options or has_confluence %}
+      <button type="button" id="chat-advanced-toggle" class="btn btn-outline chat-advanced-toggle"
+              aria-expanded="false" aria-controls="chat-advanced" title="定例シリーズや検索対象を指定する">
+        {{ m.icon("settings") }}<span class="chat-advanced-label">詳細設定</span>
+        <span class="badge badge-primary chat-advanced-badge" hidden>変更あり</span>
+      </button>
+      {% endif %}
+      <input class="input chat-input" type="text" name="question" autocomplete="off"
+        placeholder="質問を入力してEnter（例: 〇〇を報告した資料はある？）" required />
+      <button type="submit" class="btn chat-send">
+        <span class="chat-send-idle">{{ m.icon("send") }}送信</span>
+        <span class="chat-send-busy">{{ m.icon("loader", "spin") }}検索中…</span>
+      </button>
+    </div>
+    </form>
+
+  <template id="chat-pending-template">
+    <div class="chat-turn chat-turn-pending">
+      <div class="chat-bubble chat-user">
+        <div class="chat-avatar chat-avatar-user">{{ m.icon("user", "icon") }}</div>
+        <div class="chat-bubble-body" data-pending-question></div>
+      </div>
+      <div class="chat-bubble chat-ai">
+        <div class="chat-avatar chat-avatar-ai">{{ m.icon("sparkles", "icon") }}</div>
+        <div class="chat-bubble-body">
+          <div class="chat-pending">{{ m.icon("loader", "spin") }}<span>検索中…</span></div>
+        </div>
+      </div>
+    </div>
+  </template>
+  </section>
+</div>
+{% endblock %}

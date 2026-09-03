@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+<div id="search-workspace" class="stack wrap-7xl" style="gap:1.5rem"
+  hx-sync="#search-workspace:replace" hx-indicator="#search-panel">
+  <div id="search-panel" class="search-panel">
+    <div class="search-box">
+      {{ m.icon("search", "search-icon") }}
+      <input class="input" type="text" name="q" value="{{ q or '' }}"
+        placeholder="複数キーワード（AND）、OR、-除外 を入力してEnterまたは検索ボタン"
+        aria-label="スライドを検索"
+        autocomplete="off"
+        hx-get="/ui/search" hx-target="#facet-content" hx-swap="innerHTML"
+        hx-trigger="keyup[key=='Enter']"
+        hx-include="#facet-state, [name='mode'], [name='source']" />
+      <button type="button" class="btn search-btn"
+        aria-label="検索を実行"
+        hx-get="/ui/search" hx-target="#facet-content" hx-swap="innerHTML"
+        hx-include="[name='q'], #facet-state, [name='mode'], [name='source']">
+        {{ m.icon("search") }}<span>検索</span>
+      </button>
+    </div>
+
+    <div class="search-options-shell">
+      <button type="button" id="search-options-toggle" class="search-options-toggle"
+        aria-expanded="false" aria-controls="search-options-panel">
+        <span class="options-toggle-leading">{{ m.icon("settings") }}<span>検索条件</span></span>
+        <span id="search-options-summary" class="search-options-summary" aria-live="polite">
+          {% include "_search_summary.html" %}
+        </span>
+        <span class="options-toggle-trailing">{{ m.icon("chevron-right", "options-chevron") }}</span>
+      </button>
+      <div id="search-options-panel" class="search-options-panel"
+        role="region" aria-labelledby="search-options-toggle" hidden>
+        <div class="search-aux-grid">
+          <div>
+            <div class="facet-mini-label">検索モード</div>
+            <div class="mode-toggle" role="radiogroup" aria-label="検索モード">
+              <label class="mode-option">
+                <input type="radio" name="mode" value="keyword" {% if mode != 'semantic' %}checked{% endif %}
+                  hx-get="/ui/search" hx-target="#facet-content" hx-swap="innerHTML"
+                  hx-trigger="change" hx-include="[name='q'], #facet-state, [name='source']" />
+                <span>{{ m.icon("search") }}キーワード</span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="mode" value="semantic" {% if mode == 'semantic' %}checked{% endif %}
+                  hx-get="/ui/search" hx-target="#facet-content" hx-swap="innerHTML"
+                  hx-trigger="change" hx-include="[name='q'], #facet-state, [name='source']" />
+                <span>{{ m.icon("sparkles") }}セマンティック</span>
+              </label>
+            </div>
+          </div>
+          {% if has_confluence %}
+          {% set sel = sources or [] %}
+          <div>
+            <div class="facet-mini-label">検索対象</div>
+            <div class="source-toggle" role="group" aria-label="検索対象">
+              <label class="source-option">
+                <input type="checkbox" name="source" value="pptx"
+                  {% if not sel or 'pptx' in sel %}checked{% endif %}
+                  hx-get="/ui/search" hx-target="#facet-content" hx-swap="innerHTML"
+                  hx-trigger="change" hx-include="[name='q'], #facet-state, [name='mode'], [name='source']" />
+                <span>{{ m.icon("presentation") }}パワポ</span>
+              </label>
+              <label class="source-option">
+                <input type="checkbox" name="source" value="confluence"
+                  {% if not sel or 'confluence' in sel %}checked{% endif %}
+                  hx-get="/ui/search" hx-target="#facet-content" hx-swap="innerHTML"
+                  hx-trigger="change" hx-include="[name='q'], #facet-state, [name='mode'], [name='source']" />
+                <span>{{ m.icon("file-text") }}Confluence</span>
+              </label>
+            </div>
+          </div>
+          {% endif %}
+        </div>
+
+        <div class="hint-row">
+          <span class="font-medium" style="color:hsl(var(--foreground))">検索のコツ:</span>
+          <span><code>金融 銀行</code> 両方を含む（AND）</span>
+          <span><code>金融 OR 製造</code> どちらか（OR）</span>
+          <span><code>金融 -銀行</code> 除外</span>
+          <span><code>"新規事業"</code> フレーズ</span>
+        </div>
+
+        <div id="facet-panel">
+          <div id="facet-content">
+            {% include "_facet_panel.html" %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="results-panel">
+    {% include "_results_panel.html" %}
+  </div>
+</div>
+{% endblock %}
