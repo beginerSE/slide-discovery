@@ -1,0 +1,42 @@
+# Copy to terraform.tfvars and fill in. Do NOT commit terraform.tfvars.
+
+project_id = "my-gcp-project"
+region     = "us-central1"
+
+# Build + push the image first (see ../README.md), then paste the tag here.
+image = "us-central1-docker.pkg.dev/my-gcp-project/slide-search/api:latest"
+
+# Cloud SQL (Postgres) — the connection name is project:region:instance.
+instance_connection_name = "my-gcp-project:us-central1:slide-search-db"
+cloud_sql_instance_name  = "slide-search-db"
+cloud_sql_db             = "slidesearch"
+
+# IAM database auth (key-less, the GCP-mode default). When true, the DB user
+# is derived from the service account automatically.
+create_cloud_sql_iam_user = true
+
+# For password auth instead, set this to false and provide:
+# cloud_sql_user        = "appuser"
+# and add CLOUD_SQL_PASSWORD via extra_env / Secret Manager + CLOUD_SQL_IAM_AUTH=false.
+
+# Thumbnail storage. Persists slide thumbnails in Cloud Storage (survives
+# instance restarts, shared across instances). Defaults to `slide_discovery`
+# (matching config.py's gcp default) — override only to use a different bucket
+# name. Do NOT set this empty for a gcp deployment: the app still defaults to
+# `slide_discovery` at runtime, so emptying it only skips bucket/IAM wiring and
+# breaks thumbnails.
+# thumbnail_bucket          = "slide_discovery"
+# create_thumbnail_bucket   = true   # set false if the bucket already exists
+# thumbnail_bucket_location = ""      # defaults to `region`
+
+# Secret Manager secret holding SESSION_SECRET (create it before applying).
+session_secret_name = "slide-search-session-secret"
+
+# Expose publicly (the app enforces its own session auth on top).
+allow_unauthenticated = true
+
+# Optional overrides, e.g.:
+# extra_env = {
+#   CLOUD_SQL_IAM_AUTH = "true"
+#   USE_VERTEX_AI      = "true"
+# }

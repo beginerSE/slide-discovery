@@ -58,6 +58,32 @@ with a new tag.
 
 ---
 
+## Memory sizing (important)
+
+The ingest pipeline runs **headless LibreOffice** (`soffice`) to convert each
+deck PPTX → PDF, and `python-pptx` loads the whole deck into memory. This has a
+large working set, so Cloud Run's default **512 MiB is too small** — ingest
+OOMs with:
+
+> Memory limit of 512 MiB exceeded with 566 MiB used.
+
+The Terraform here already provisions **`memory = "2Gi"`** (`variables.tf`), so a
+`terraform apply` deploy is sized correctly. If you deployed manually with
+`gcloud run deploy` (which defaults to 512 MiB), bump it immediately without a
+full redeploy:
+
+```sh
+gcloud run services update slide-search-api \
+  --region=us-central1 \
+  --memory=2Gi
+```
+
+`soffice` is single-threaded per conversion and files are ingested one at a
+time, so 2 GiB is enough for typical decks; raise it further only if you ingest
+unusually large presentations.
+
+---
+
 ## Connecting Cloud SQL
 
 The app connects through the **Cloud SQL Python Connector** (`db.py`), which
@@ -94,6 +120,27 @@ the network the instance lives on.
 
 ---
 
+## Thumbnail storage (Cloud Storage)
+
+Cloud Run's local disk is **ephemeral and per-instance**, so slide thumbnails
+written there vanish on restart and aren't shared between instances. In
+production, persist them in a GCS bucket:
+
+1. `thumbnail_bucket` defaults to `slide_discovery` (in the same project as
+   Cloud Run) — override it in `terraform.tfvars` only if that name is taken.
+   Terraform then:
+   - creates the bucket (set `create_thumbnail_bucket = false` if it already
+     exists / is managed elsewhere),
+   - grants the runtime service account `roles/storage.objectAdmin` **on that
+     bucket** (least-privilege, not project-wide),
+   - sets `THUMBNAIL_BUCKET` on the Cloud Run service.
+2. `config.py` selects the GCS backend whenever `THUMBNAIL_BUCKET` is set, and
+   in gcp mode (`RUNTIME_ENV=gcp`) defaults to `slide_discovery` even without
+   the env var. In dev (no gcp mode, no env var) thumbnails stay on local disk.
+
+Thumbnails are still rendered to a local temp dir during ingest (Gemini needs a
+local file), then uploaded to GCS; serving reads them back from the bucket.
+
 ## Granting Drive folder access
 
 Drive ingest in GCP mode uses the authenticated Drive API via ADC (the same
@@ -123,7 +170,8 @@ curl -s "$(terraform output -raw service_url)/api/healthz" | jq
   "db": "cloud_sql",
   "cloudSqlIamAuth": true,
   "gemini": "vertex_ai",
-  "drive": "drive_api"
+  "drive": "drive_api",
+  "thumbnails": "gcs"
 }
 ```
 
