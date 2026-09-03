@@ -6,7 +6,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db import ChatConversation, ChatTurn, utcnow
+from db import ChatConversation, ChatTurn, Slide, utcnow
 
 _SOURCE_FIELDS = (
     "slideId",
@@ -17,6 +17,8 @@ _SOURCE_FIELDS = (
     "sourceUrl",
     "sourceType",
     "docCategory",
+    "folderId",
+    "folderName",
 )
 
 
@@ -100,7 +102,40 @@ async def list_turns(
             .order_by(ChatTurn.created_at.asc(), ChatTurn.id.asc())
         )
     ).scalars().all()
-    return [row.to_dict() for row in rows]
+    turns = [row.to_dict() for row in rows]
+    missing_slide_ids = {
+        source.get("slideId")
+        for turn in turns
+        for source in turn.get("sources", [])
+        if source.get("sourceType") != "confluence"
+        and not source.get("folderId")
+        and source.get("slideId")
+    }
+    if not missing_slide_ids:
+        return turns
+
+    folder_rows = (
+        await session.execute(
+            select(Slide.slide_id, Slide.folder_id, Slide.folder_name).where(
+                Slide.slide_id.in_(missing_slide_ids)
+            )
+        )
+    ).all()
+    folder_by_slide = {
+        slide_id: (folder_id or "", folder_name or "")
+        for slide_id, folder_id, folder_name in folder_rows
+        if folder_id
+    }
+    for turn in turns:
+        enriched_sources = []
+        for original in turn.get("sources", []):
+            source = dict(original)
+            folder = folder_by_slide.get(source.get("slideId"))
+            if folder:
+                source["folderId"], source["folderName"] = folder
+            enriched_sources.append(source)
+        turn["sources"] = enriched_sources
+    return turns
 
 
 async def find_turn_by_request(

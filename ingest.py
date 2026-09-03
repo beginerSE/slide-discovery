@@ -14,7 +14,13 @@ from sqlalchemy import delete, func, select, update
 import config
 import confluence
 from db import DriveFile, IngestJob, SessionLocal, Slide, utcnow
-from drive import DownloadResult, download, view_url
+from drive import (
+    DownloadResult,
+    download,
+    fetch_file_metadata,
+    fetch_folder_name,
+    view_url,
+)
 from gemini_embed import build_slide_embed_text, embed_text
 from gemini_extract import extract_metadata
 from pptx_pipeline import SlideExtract, extract_slides, render_thumbnails
@@ -1381,6 +1387,83 @@ def schedule_backfill_embeddings() -> None:
             await backfill_missing_embeddings()
         except Exception:
             log.exception("embedding backfill task crashed")
+
+    asyncio.create_task(_run())
+
+
+async def backfill_missing_drive_folders() -> dict[str, int]:
+    """Best-effort parent-folder enrichment for existing Drive files.
+
+    This is metadata-only: it neither downloads nor re-analyzes presentations.
+    Files whose parent folder is not visible to the Drive service account stay
+    blank and simply keep the folder links hidden.
+    """
+    if not config.use_drive_api():
+        return {"checked": 0, "filled": 0}
+
+    async with SessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(
+                    DriveFile.id,
+                    DriveFile.drive_file_id,
+                    DriveFile.folder_id,
+                    DriveFile.folder_name,
+                ).where(
+                    (DriveFile.folder_id == "") | (DriveFile.folder_name == "")
+                )
+            )
+        ).all()
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def _resolve(row):
+        async with semaphore:
+            folder_id = row.folder_id or ""
+            if not folder_id:
+                metadata = await fetch_file_metadata(row.drive_file_id)
+                folder_id = metadata.parent_id
+            if not folder_id:
+                return None
+            folder_name = row.folder_name or await fetch_folder_name(folder_id)
+            return row.id, row.drive_file_id, folder_id, folder_name
+
+    resolved = [item for item in await asyncio.gather(*[_resolve(r) for r in rows]) if item]
+    if not resolved:
+        return {"checked": len(rows), "filled": 0}
+
+    filled = 0
+    async with SessionLocal() as session:
+        for row_id, drive_file_id, folder_id, folder_name in resolved:
+            row = await session.get(DriveFile, row_id)
+            if row is None:
+                continue
+            if not row.folder_id:
+                row.folder_id = folder_id
+            if not row.folder_name and folder_name:
+                row.folder_name = folder_name
+            await session.execute(
+                update(Slide)
+                .where(Slide.file_id == drive_file_id)
+                .values(folder_id=row.folder_id, folder_name=row.folder_name)
+            )
+            filled += 1
+        await session.commit()
+    log.info(
+        "Drive parent-folder backfill: checked=%d filled=%d",
+        len(rows),
+        filled,
+    )
+    return {"checked": len(rows), "filled": filled}
+
+
+def schedule_backfill_drive_folders() -> None:
+    """Fire-and-forget Drive parent-folder enrichment kicked off at startup."""
+    async def _run() -> None:
+        try:
+            await backfill_missing_drive_folders()
+        except Exception:
+            log.exception("Drive parent-folder backfill task crashed")
 
     asyncio.create_task(_run())
 

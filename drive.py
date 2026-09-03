@@ -537,21 +537,38 @@ async def download(file_id: str, out_dir: Path) -> DownloadResult:
     return dl
 
 
-async def _fetch_file_name_api(file_id: str) -> str:
-    def _run() -> str:
+@dataclass(frozen=True)
+class DriveFileMetadata:
+    name: str = ""
+    parent_id: str = ""
+
+
+async def _fetch_file_metadata_api(file_id: str) -> DriveFileMetadata:
+    def _run() -> DriveFileMetadata:
         svc = _drive_service()
         meta = (
             svc.files()
-            .get(fileId=file_id, fields="name", supportsAllDrives=True)
+            .get(fileId=file_id, fields="name, parents", supportsAllDrives=True)
             .execute()
         )
-        return meta.get("name", "")
+        parents = meta.get("parents") or []
+        return DriveFileMetadata(
+            name=meta.get("name", ""),
+            parent_id=parents[0] if parents else "",
+        )
 
     try:
         return await asyncio.to_thread(_run)
     except Exception as e:  # noqa: BLE001
-        log.warning("file name lookup failed (id=%s): %s", file_id, e)
-        return ""
+        log.warning("file metadata lookup failed (id=%s): %s", file_id, e)
+        return DriveFileMetadata()
+
+
+async def fetch_file_metadata(file_id: str) -> DriveFileMetadata:
+    """Best-effort file name and immediate parent folder id without download."""
+    if config.use_drive_api():
+        return await _fetch_file_metadata_api(file_id)
+    return DriveFileMetadata()
 
 
 async def fetch_file_name(file_id: str) -> str:
@@ -562,9 +579,7 @@ async def fetch_file_name(file_id: str) -> str:
     ``files().get`` metadata call. In public share-link mode the name is only
     known after the file is downloaded at ingest time, so this returns "".
     """
-    if config.use_drive_api():
-        return await _fetch_file_name_api(file_id)
-    return ""
+    return (await fetch_file_metadata(file_id)).name
 
 
 async def fetch_folder_name(folder_id: str) -> str:
@@ -577,7 +592,7 @@ async def fetch_folder_name(folder_id: str) -> str:
     """
     if not folder_id or not config.use_drive_api():
         return ""
-    return await _fetch_file_name_api(folder_id)
+    return (await _fetch_file_metadata_api(folder_id)).name
 
 
 # --- Drive Changes API (incremental sync, Drive API / ADC mode only) --------

@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timezone
 from typing import AsyncGenerator
+from urllib.parse import quote
 from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
@@ -132,6 +133,14 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def drive_folder_url(folder_id: str | None) -> str:
+    """Return a safe browser URL for a stored Google Drive folder id."""
+    value = (folder_id or "").strip()
+    if not value:
+        return ""
+    return f"https://drive.google.com/drive/folders/{quote(value, safe='')}"
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -214,6 +223,7 @@ class Slide(Base):
             "accessLevel": self.access_level,
             "folderId": self.folder_id,
             "folderName": self.folder_name,
+            "folderUrl": drive_folder_url(self.folder_id),
             "docDate": self.doc_date.isoformat() if self.doc_date else None,
             "createdAt": self.created_at.astimezone(timezone.utc)
             .isoformat()
@@ -416,6 +426,7 @@ class DriveFile(Base):
             "slideCount": self.slide_count,
             "folderId": self.folder_id,
             "folderName": self.folder_name,
+            "folderUrl": drive_folder_url(self.folder_id),
             "docDate": self.doc_date.isoformat() if self.doc_date else None,
             "addedAt": self.added_at.astimezone(timezone.utc)
             .isoformat()

@@ -30,13 +30,18 @@ from db import (
     DriveFile,
     Slide,
     SessionLocal,
+    drive_folder_url,
     get_session,
     init_db,
     utcnow,
 )
 from gemini_embed import embed_text
 import thumbnail_store
-from ingest import reap_orphaned_jobs, schedule_backfill_embeddings
+from ingest import (
+    reap_orphaned_jobs,
+    schedule_backfill_drive_folders,
+    schedule_backfill_embeddings,
+)
 from perf_metrics import (
     add_timing,
     begin_request,
@@ -54,7 +59,7 @@ from search_quality import (
     SEMANTIC_MIN_SIMILARITY,
     keyword_match_payload,
     keyword_rank_sql,
-    semantic_fit_tier,
+    semantic_fit_tier_sql,
     semantic_match_payload,
 )
 from scheduler import start_scheduler, stop_scheduler
@@ -166,6 +171,7 @@ async def _initialize_backend() -> None:
         # Clear jobs/files left "running"/"processing" by a previous process
         # that died mid-ingest, so they don't block scheduling or show forever.
         await reap_orphaned_jobs()
+        schedule_backfill_drive_folders()
         schedule_backfill_embeddings()
         start_scheduler()
         _startup_state["schedulerStarted"] = True
@@ -314,6 +320,7 @@ def _slide_card_dict(row) -> dict:
         "accessLevel": values[Slide.access_level],
         "folderId": values[Slide.folder_id],
         "folderName": values[Slide.folder_name],
+        "folderUrl": drive_folder_url(values[Slide.folder_id]),
         "docDate": doc_date.isoformat() if doc_date else None,
         "createdAt": iso(values[Slide.created_at]),
         "updatedAt": iso(values[Slide.updated_at]),
@@ -513,78 +520,111 @@ async def search_slides(
                 else:
                     total = 0
             else:
-                # Public search applies a second, context-aware stage after the
-                # absolute floor. Fetch lightweight candidates first so the
-                # accepted total is exact before pagination.
+                # Public search applies its context-aware stage in Postgres.
+                # This preserves exact totals and offset paging without sending
+                # every floor-qualified candidate through the Python process.
                 candidate_stmt = sem_stmt.with_only_columns(
                     Slide.slide_id,
                     Slide.file_id,
-                    Slide.folder_id,
                     Slide.industry,
                     Slide.proposal_type,
                     Slide.doc_category,
+                    Slide.created_at,
                     distance,
                     maintain_column_froms=True,
+                ).order_by(None)
+                candidates = candidate_stmt.subquery("semantic_candidates")
+                semantic_order = (
+                    candidates.c.distance.asc(),
+                    candidates.c.created_at.desc(),
+                )
+                scored = select(
+                    candidates,
+                    *(
+                        func.first_value(column)
+                        .over(order_by=semantic_order)
+                        .label(f"leader_{name}")
+                        for name, column in (
+                            ("slide_id", candidates.c.slide_id),
+                            ("file_id", candidates.c.file_id),
+                            ("industry", candidates.c.industry),
+                            (
+                                "proposal_type",
+                                candidates.c.proposal_type,
+                            ),
+                            ("doc_category", candidates.c.doc_category),
+                            ("distance", candidates.c.distance),
+                        )
+                    ),
+                ).subquery("semantic_scored")
+                fit_tier = semantic_fit_tier_sql(
+                    {
+                        "slideId": scored.c.slide_id,
+                        "fileId": scored.c.file_id,
+                        "industry": scored.c.industry,
+                        "proposalType": scored.c.proposal_type,
+                        "docCategory": scored.c.doc_category,
+                    },
+                    {
+                        "slideId": scored.c.leader_slide_id,
+                        "fileId": scored.c.leader_file_id,
+                        "industry": scored.c.leader_industry,
+                        "proposalType": scored.c.leader_proposal_type,
+                        "docCategory": scored.c.leader_doc_category,
+                    },
+                    1.0 - scored.c.distance,
+                    1.0 - scored.c.leader_distance,
+                ).label("fit_tier")
+                classified = select(
+                    scored.c.slide_id,
+                    scored.c.distance,
+                    scored.c.created_at,
+                    fit_tier,
+                ).subquery("semantic_classified")
+                accepted = (
+                    select(classified)
+                    .where(classified.c.fit_tier.is_not(None))
+                    .subquery("semantic_accepted")
+                )
+                accepted_total = func.count().over().label("total_count")
+                paged_stmt = (
+                    select(
+                        Slide,
+                        accepted.c.distance,
+                        accepted.c.fit_tier,
+                        accepted_total,
+                    )
+                    .join(
+                        accepted,
+                        accepted.c.slide_id == Slide.slide_id,
+                    )
+                    .order_by(
+                        accepted.c.distance.asc(),
+                        accepted.c.created_at.desc(),
+                    )
+                    .limit(limit)
+                    .offset(offset)
                 )
                 with timed("db_search"):
-                    candidate_rows = (
-                        await session.execute(candidate_stmt)
-                    ).all()
-                accepted: list[tuple[str, float, str]] = []
-                if candidate_rows:
-                    leader_row = candidate_rows[0]
-                    leader = {
-                        "slideId": leader_row.slide_id,
-                        "fileId": leader_row.file_id,
-                        "folderId": leader_row.folder_id,
-                        "industry": leader_row.industry,
-                        "proposalType": leader_row.proposal_type,
-                        "docCategory": leader_row.doc_category,
-                    }
-                    leader_similarity = 1.0 - float(leader_row.distance)
-                    for row in candidate_rows:
-                        similarity = 1.0 - float(row.distance)
-                        candidate = {
-                            "slideId": row.slide_id,
-                            "fileId": row.file_id,
-                            "folderId": row.folder_id,
-                            "industry": row.industry,
-                            "proposalType": row.proposal_type,
-                            "docCategory": row.doc_category,
-                        }
-                        tier = semantic_fit_tier(
-                            candidate,
-                            leader,
-                            similarity,
-                            leader_similarity,
-                        )
-                        if tier:
-                            accepted.append((row.slide_id, similarity, tier))
-                total = len(accepted)
-                page = accepted[offset : offset + limit]
-                page_ids = [slide_id for slide_id, _, _ in page]
-                if page_ids:
-                    with timed("db_search_page"):
-                        page_slides = (
+                    paged_rows = (await session.execute(paged_stmt)).all()
+                rows = [
+                    (slide_row, dist, fit_tier)
+                    for slide_row, dist, fit_tier, _row_total in paged_rows
+                ]
+                if paged_rows:
+                    total = int(paged_rows[0][3])
+                elif offset:
+                    with timed("db_search_count"):
+                        total = int(
                             (
                                 await session.execute(
-                                    select(Slide).where(
-                                        Slide.slide_id.in_(page_ids)
-                                    )
+                                    select(func.count()).select_from(accepted)
                                 )
-                            )
-                            .scalars()
-                            .all()
+                            ).scalar()
+                            or 0
                         )
-                    slides_by_id = {
-                        slide.slide_id: slide for slide in page_slides
-                    }
-                    rows = [
-                        (slides_by_id[slide_id], 1.0 - similarity, tier)
-                        for slide_id, similarity, tier in page
-                    ]
                 else:
-                    rows = []
+                    total = 0
             items: list[dict] = []
             for slide_row, dist, fit_tier in rows:
                 s = slide_row.to_dict()

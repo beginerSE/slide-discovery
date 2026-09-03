@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth import require_admin
 from db import AddLog, DriveFile, DriveFolder, Slide, User, get_session, utcnow
 from drive import (
-    fetch_file_name,
+    fetch_file_metadata,
     fetch_folder_name,
     list_folder_files,
     parse_share_input,
@@ -72,10 +72,10 @@ async def resolve_input_entries(
     """Parse pasted links + expand any folder URLs into individual files.
 
     Returns ``(entries, folder_errors)`` where each entry is
-    ``(drive_file_id, share_url, file_name, folder_id)``. ``file_name`` is ""
-    when the name is not yet known (direct file links); ``folder_id`` is the
-    Drive folder the file was listed under (its recurring-meeting series key),
-    or "" for direct file links. Registers folders so the incremental change
+    ``(drive_file_id, share_url, file_name, folder_id)``. In Drive API mode,
+    direct file links are enriched with their immediate parent folder; in
+    public-link mode their name/folder remain unknown until ingest. Registers
+    explicitly pasted folders so the incremental change
     poller can watch them, but does NOT register or commit DriveFile rows —
     callers decide how to handle collisions first.
     """
@@ -143,10 +143,13 @@ async def resolve_input_entries(
         url = original if original.startswith("http") else view_url(file_id)
         name = known_names.get(file_id, "")
         if not name:
-            # Direct file link (not from a folder listing): look up the name so
-            # collision detection can still run. Cheap metadata call in Drive
-            # API mode; "" in public mode (name only known after download).
-            name = await fetch_file_name(file_id)
+            # Direct file link (not from a folder listing): one metadata call
+            # supplies both the name and its immediate parent folder in Drive
+            # API mode. Public-link mode cannot discover either before ingest.
+            metadata = await fetch_file_metadata(file_id)
+            name = metadata.name
+            if metadata.parent_id:
+                file_folder.setdefault(file_id, metadata.parent_id)
         entries.append((file_id, url, name, file_folder.get(file_id, "")))
     return entries, folder_errors
 

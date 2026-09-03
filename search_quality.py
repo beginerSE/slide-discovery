@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from sqlalchemy import case, func, literal
+
 from search_query import ParsedQuery
 
 
@@ -18,6 +20,15 @@ SEMANTIC_NEAR_TOP_GAP = 0.02
 _MAX_RANK_TERMS = 12
 _SNIPPET_LENGTH = 170
 _UNSPECIFIED_FACETS = {"", "その他", "不明", "未設定", "other", "unknown"}
+_ASCII_UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_ASCII_LOWER = "abcdefghijklmnopqrstuvwxyz"
+_FACET_TRIM_CHARS = (
+    " \t\n\r\v\f"
+    "\u001c\u001d\u001e\u001f\u0085\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+_ASCII_LOWER_TABLE = str.maketrans(_ASCII_UPPER, _ASCII_LOWER)
 
 
 @dataclass(frozen=True)
@@ -95,18 +106,25 @@ def _rank_terms(parsed: ParsedQuery) -> list[str]:
     return terms
 
 
+def _normalize_facet(value: object) -> str:
+    """Normalize domain facets identically in Python and PostgreSQL."""
+    return str(value or "").strip(_FACET_TRIM_CHARS).translate(
+        _ASCII_LOWER_TABLE
+    )
+
+
 def _meaningful_equal(left: object, right: object) -> bool:
-    left_value = str(left or "").strip()
-    right_value = str(right or "").strip()
+    left_value = _normalize_facet(left)
+    right_value = _normalize_facet(right)
     return (
-        left_value.casefold() not in _UNSPECIFIED_FACETS
-        and right_value.casefold() not in _UNSPECIFIED_FACETS
-        and left_value.casefold() == right_value.casefold()
+        left_value not in _UNSPECIFIED_FACETS
+        and right_value not in _UNSPECIFIED_FACETS
+        and left_value == right_value
     )
 
 
 def _is_meaningful(value: object) -> bool:
-    return str(value or "").strip().casefold() not in _UNSPECIFIED_FACETS
+    return _normalize_facet(value) not in _UNSPECIFIED_FACETS
 
 
 def semantic_fit_tier(
@@ -148,6 +166,73 @@ def semantic_fit_tier(
     ):
         return "near_top_same_use"
     return None
+
+
+def semantic_fit_tier_sql(
+    candidate: dict,
+    leader: dict,
+    similarity,
+    leader_similarity,
+):
+    """SQL equivalent of semantic_fit_tier for exact DB-side paging/counts."""
+
+    def normalized(value):
+        return func.translate(
+            func.btrim(func.coalesce(value, ""), _FACET_TRIM_CHARS),
+            _ASCII_UPPER,
+            _ASCII_LOWER,
+        )
+
+    def meaningful(value):
+        return normalized(value).not_in(tuple(_UNSPECIFIED_FACETS))
+
+    def meaningful_equal(left, right):
+        return (
+            meaningful(left)
+            & meaningful(right)
+            & (normalized(left) == normalized(right))
+        )
+
+    candidate_industry = candidate["industry"]
+    leader_industry = leader["industry"]
+    return case(
+        (
+            candidate["slideId"] == leader["slideId"],
+            literal("leader"),
+        ),
+        (
+            similarity >= SEMANTIC_STRONG_SIMILARITY,
+            literal("strong"),
+        ),
+        (
+            meaningful_equal(candidate["fileId"], leader["fileId"]),
+            literal("same_document"),
+        ),
+        (
+            meaningful_equal(candidate_industry, leader_industry),
+            literal("same_industry"),
+        ),
+        (
+            ~meaningful(candidate_industry)
+            & ~meaningful(leader_industry)
+            & (
+                leader_similarity - similarity
+                <= SEMANTIC_NEAR_TOP_GAP
+            )
+            & (
+                meaningful_equal(
+                    candidate["proposalType"],
+                    leader["proposalType"],
+                )
+                | meaningful_equal(
+                    candidate["docCategory"],
+                    leader["docCategory"],
+                )
+            ),
+            literal("near_top_same_use"),
+        ),
+        else_=None,
+    )
 
 
 def keyword_rank_sql(parsed: ParsedQuery) -> tuple[str, dict]:
