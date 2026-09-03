@@ -87,6 +87,16 @@ document.addEventListener("click", (e) => {
   input.focus();
 });
 
+// 対話検索: destructive action is deliberately confirmed even when navigating
+// directly from a long-running conversation.
+document.addEventListener("submit", (e) => {
+  const form = e.target;
+  if (!form.matches || !form.matches("[data-chat-delete]")) return;
+  if (!window.confirm("この会話を削除しますか？\nこの操作は取り消せません。")) {
+    e.preventDefault();
+  }
+});
+
 // 対話検索: 詳細設定（定例シリーズ・検索対象）の折りたたみパネル。
 // デフォルト（自動判定・全ソースON）以外の設定中はボタンに「変更あり」
 // バッジを出し、今どんな条件で聞いているかを閉じたままでも示す。
@@ -171,6 +181,132 @@ document.addEventListener("click", (e) => {
   });
   restoreSettings();
   syncBadge();
+})();
+
+// Search controls are deliberately outside the HTMX swap target. Keep this
+// small controller delegated so it also behaves correctly after navigation or
+// partial page enhancement, while preserving keyboard focus on the toggle.
+(function initSearchOptions() {
+  let pendingFocus = null;
+
+  function setFacetState(button) {
+    const state = document.getElementById("facet-state");
+    if (!state) return;
+    const field = button.dataset.facetField;
+    const value = button.dataset.facetValue;
+    let hidden = Array.from(state.querySelectorAll("input")).find(
+      (input) => input.name === field
+    );
+    const wasActive = button.getAttribute("aria-pressed") === "true";
+
+    document.querySelectorAll("[data-facet-field]").forEach((candidate) => {
+      if (candidate.dataset.facetField !== field) return;
+      candidate.classList.remove("active");
+      candidate.setAttribute("aria-pressed", "false");
+    });
+
+    if (wasActive) {
+      if (hidden) hidden.remove();
+    } else {
+      if (!hidden) {
+        hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = field;
+        state.appendChild(hidden);
+      }
+      hidden.value = value;
+      button.classList.add("active");
+      button.setAttribute("aria-pressed", "true");
+    }
+    pendingFocus = { field, value };
+  }
+
+  function clearSearchState() {
+    const query = document.querySelector('input[name="q"]');
+    if (query) query.value = "";
+    const state = document.getElementById("facet-state");
+    if (state) state.replaceChildren();
+    document.querySelectorAll("[data-facet-field]").forEach((button) => {
+      button.classList.remove("active");
+      button.setAttribute("aria-pressed", "false");
+    });
+    pendingFocus = { query: true };
+  }
+
+  function bind(root) {
+    const toggle = (root || document).querySelector("#search-options-toggle");
+    const panel = (root || document).querySelector("#search-options-panel");
+    if (!toggle || !panel || toggle.dataset.bound === "1") return;
+    toggle.dataset.bound = "1";
+    const setOpen = (open) => {
+      panel.toggleAttribute("hidden", !open);
+      toggle.setAttribute("aria-expanded", String(open));
+    };
+    toggle.addEventListener("click", () => {
+      const open = toggle.getAttribute("aria-expanded") !== "true";
+      setOpen(open);
+    });
+    setOpen(toggle.getAttribute("aria-expanded") === "true");
+  }
+  document.addEventListener("DOMContentLoaded", () => bind(document));
+
+  // Update the canonical hidden facet state in the capture phase, before htmx
+  // serializes the request. Together with hx-sync=:replace this makes a rapid
+  // second click carry both of the user's latest facet choices.
+  document.addEventListener("click", (event) => {
+    const facet = event.target.closest && event.target.closest("[data-facet-field]");
+    if (facet) {
+      setFacetState(facet);
+      return;
+    }
+    const clear = event.target.closest && event.target.closest("[data-search-clear]");
+    if (clear) clearSearchState();
+  }, true);
+
+  // An empty source list means "all sources" on the server. Prevent the
+  // visible controls from reaching a misleading all-unchecked state before
+  // htmx serializes the change event.
+  document.addEventListener("change", (event) => {
+    const input = event.target;
+    if (!input.matches || !input.matches('#search-options-panel input[name="source"]')) return;
+    const selected = document.querySelectorAll(
+      '#search-options-panel input[name="source"]:checked'
+    );
+    if (selected.length === 0) input.checked = true;
+  }, true);
+
+  document.body && document.body.addEventListener("htmx:beforeRequest", (event) => {
+    const requestElement = (
+      event.detail
+      && event.detail.requestConfig
+      && event.detail.requestConfig.elt
+    ) || event.target;
+    if (!requestElement.closest || !requestElement.closest("#search-panel")) return;
+    if (!requestElement.matches("[data-facet-field], [data-search-clear]")) {
+      pendingFocus = null;
+    }
+  });
+
+  document.body && document.body.addEventListener("htmx:afterSwap", (event) => {
+    if (!pendingFocus || !event.target || event.target.id !== "facet-content") return;
+    if (pendingFocus.query) {
+      const query = document.querySelector('input[name="q"]');
+      if (query) query.focus();
+    } else {
+      const replacement = Array.from(
+        event.target.querySelectorAll("[data-facet-field]")
+      ).find((button) => (
+        button.dataset.facetField === pendingFocus.field
+        && button.dataset.facetValue === pendingFocus.value
+      ));
+      if (replacement) replacement.focus();
+      else {
+        const toggle = document.getElementById("search-options-toggle");
+        if (toggle) toggle.focus();
+      }
+    }
+    pendingFocus = null;
+  });
 })();
 
 // 対話検索: scroll newly appended turns into view.
