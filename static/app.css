@@ -646,6 +646,22 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 }
 .card-source-open svg { width: 0.85rem; height: 0.85rem; }
 .card-source-open:hover { text-decoration: underline; }
+.card-folder-open {
+  position: relative;
+  z-index: 2;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  max-width: 100%;
+  margin-top: -0.1rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.7rem;
+  line-height: 1.25;
+}
+.card-folder-open span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-folder-open svg { width: 0.8rem; height: 0.8rem; flex: none; }
+.card-folder-open:hover { color: hsl(var(--primary)); text-decoration: underline; }
 
 .thumb {
   aspect-ratio: 16 / 9;
@@ -860,6 +876,7 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 @media (min-width: 640px) { .two-col { grid-template-columns: 1fr 1fr; } }
 
 .prose { font-size: 0.85rem; line-height: 1.7; color: hsl(var(--muted-foreground)); white-space: pre-wrap; }
+.detail-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.5rem; }
 
 /* ---------- Login ---------- */
 .login-wrap { max-width: 26rem; margin: 2.5rem auto; }
@@ -898,6 +915,34 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 .file-name { font-weight: 500; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-meta { font-size: 0.72rem; color: hsl(var(--muted-foreground)); margin-top: 0.25rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
 .file-meta a:hover { color: hsl(var(--primary)); }
+.file-folder-link { max-width: 100%; }
+.file-folder-link svg { flex: none; }
+
+/* Parent-folder paths: secondary, compact navigation alongside the source file. */
+.chat-source-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 0.25rem;
+  color: hsl(var(--muted-foreground));
+  font-size: 0.68rem;
+  line-height: 1.25;
+}
+.chat-source-folder span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-source-folder svg { width: 0.78rem; height: 0.78rem; flex: none; }
+.chat-source-folder:hover { color: hsl(var(--primary)); text-decoration: underline; }
+
+@media (max-width: 639px) {
+  .detail-actions { width: 100%; justify-content: flex-start; }
+  .detail-actions .btn { flex: 1 1 auto; }
+}
 
 .divider-list > * { border-top: 1px solid hsl(var(--border)); }
 .divider-list > *:first-child { border-top: none; }
@@ -1063,17 +1108,21 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 .table tbody tr:hover { background: hsl(var(--accent) / 0.4); }
 .nowrap { white-space: nowrap; }
 
-/* ── 対話検索 (chat) ──────────────────────────────────────────────── */
-.chat-workspace { width: 100%; max-width: 76rem; margin: 0 auto; display: grid; grid-template-columns: 16.5rem minmax(0, 1fr); gap: 2rem; align-items: start; }
-.chat-history { position: sticky; top: 4rem; max-height: calc(100vh - 5.5rem); display: flex; flex-direction: column; background: hsl(var(--card)); border: 1px solid hsl(var(--border)); border-radius: .75rem; overflow: hidden; box-shadow: 0 1px 2px hsl(var(--foreground) / .035); }
-.chat-history-head { display: flex; justify-content: space-between; gap: .75rem; align-items: center; padding: 1rem; border-bottom: 1px solid hsl(var(--border)); }
+/* ── 対話検索 (chat) ────────────────────────────────────────────────
+   Desktop intentionally treats navigation and saved conversations as a
+   continuous two-part rail. The reading surface begins only after both. */
+.chat-shell .topbar { display: none; }
+.chat-content { padding: 0; min-height: 100dvh; }
+.chat-workspace { width: 100%; min-height: 100dvh; display: grid; grid-template-columns: 17.75rem minmax(0, 1fr); align-items: stretch; }
+.chat-history { min-height: 100dvh; height: 100dvh; position: sticky; top: 0; display: flex; flex-direction: column; background: hsl(var(--card)); border-right: 1px solid hsl(var(--border)); overflow: hidden; }
+.chat-history-head { display: flex; justify-content: space-between; gap: .75rem; align-items: center; padding: 1.25rem 1rem 1rem; border-bottom: 1px solid hsl(var(--border)); }
 .chat-eyebrow { color: hsl(var(--muted-foreground)); font-weight: 700; font-size: .67rem; letter-spacing: .075em; text-transform: uppercase; }
 .chat-history-title { font-size: .96rem; line-height: 1.25; }
 .chat-new-conversation { padding-inline: .6rem; }
-.chat-history-list { padding: .5rem; overflow-y: auto; min-height: 9rem; }
-.chat-history-item { display: flex; align-items: flex-start; gap: .55rem; padding: .65rem .6rem; border-radius: .5rem; transition: background .14s ease, color .14s ease; }
+.chat-history-list { flex: 1; padding: .65rem .5rem; overflow-y: auto; min-height: 9rem; }
+.chat-history-item { display: flex; align-items: flex-start; gap: .55rem; padding: .7rem .65rem; border-radius: .38rem; border-left: 2px solid transparent; transition: background .14s ease, color .14s ease, border-color .14s ease; }
 .chat-history-item:hover { background: hsl(var(--accent) / .7); }
-.chat-history-item.is-active { background: hsl(var(--primary) / .09); color: hsl(var(--primary)); }
+.chat-history-item.is-active { background: hsl(var(--primary) / .09); color: hsl(var(--primary)); border-left-color: hsl(var(--primary)); }
 .chat-history-item-icon { display: inline-flex; margin-top: .1rem; color: hsl(var(--muted-foreground)); }
 .chat-history-item.is-active .chat-history-item-icon { color: hsl(var(--primary)); }
 .chat-history-item-icon svg { width: .95rem; height: .95rem; }
@@ -1084,9 +1133,9 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 .chat-history-empty svg { opacity: .55; margin-bottom: .65rem; }
 .chat-history-empty p { font-size: .78rem; font-weight: 600; color: hsl(var(--foreground)); }
 .chat-history-empty span { margin-top: .25rem; font-size: .72rem; line-height: 1.55; }
-.chat-history-foot { padding: .65rem 1rem; border-top: 1px solid hsl(var(--border)); font-size: .68rem; color: hsl(var(--muted-foreground)); }
-.chat-page { min-width: 0; display: flex; flex-direction: column; gap: 1.1rem; width: 100%; }
-.chat-conversation-head { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; padding: .65rem 0 .35rem; }
+.chat-history-foot { padding: .8rem 1rem; border-top: 1px solid hsl(var(--border)); font-size: .68rem; color: hsl(var(--muted-foreground)); background: hsl(var(--muted) / .28); }
+.chat-page { min-width: 0; width: 100%; max-width: 62rem; margin: 0 auto; padding: 2.5rem clamp(1.5rem, 4vw, 4rem) 1rem; display: flex; flex-direction: column; gap: 1.25rem; }
+.chat-conversation-head { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; padding: 0 .1rem .5rem; }
 .chat-conversation-heading { min-width: 0; }
 .chat-title { font-size: 1.35rem; font-weight: 700; letter-spacing: -.025em; margin: .18rem 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-sub { color: hsl(var(--muted-foreground)); font-size: .86rem; max-width: 39rem; }
@@ -1097,7 +1146,7 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 .chat-chip { font-family: inherit; text-align: left; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); color: hsl(var(--foreground)); border-radius: 999px; padding: 0.35rem 0.8rem; font-size: 0.76rem; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
 .chat-chip:hover { background: hsl(var(--accent)); border-color: hsl(var(--primary)); }
 
-.chat-thread { display: flex; flex-direction: column; gap: 1.75rem; padding: .3rem 0 .8rem; }
+.chat-thread { display: flex; flex-direction: column; gap: 1.75rem; padding: .5rem .1rem 1rem; }
 .chat-turn { display: flex; flex-direction: column; gap: .8rem; animation: chatTurnIn .22s ease both; }
 .chat-bubble { display: flex; gap: 0.65rem; align-items: flex-start; }
 .chat-user { flex-direction: row-reverse; }
@@ -1137,7 +1186,7 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 /* 縦積みレイアウト（詳細設定パネル → 入力行）。以前は flex-wrap の横並びで、
    狭い幅や「検索中…」でボタン幅が変わると送信ボタンが入力欄の下に落ちて
    崩れることがあった。入力行は folding しない（下の .chat-input-row）。 */
-.chat-composer { position: sticky; bottom: 0; z-index: 5; display: flex; flex-direction: column; gap: .5rem; padding: 1rem 0 .25rem; background: linear-gradient(to top, hsl(var(--background)) 78%, hsl(var(--background) / 0)); }
+.chat-composer { position: sticky; bottom: 0; z-index: 5; display: flex; flex-direction: column; gap: .5rem; padding: 1.25rem 0 .75rem; background: linear-gradient(to top, hsl(var(--background)) 78%, hsl(var(--background) / 0)); }
 .chat-series-field { flex: 1 1 100%; }
 .chat-series { align-items: center; }
 .chat-series select { flex: 1; min-width: 0; }
@@ -1177,16 +1226,19 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 .chat-composer.htmx-request .chat-send-idle { display: none; }
 .chat-composer.htmx-request .chat-send-busy { display: inline-flex; }
 @keyframes chatTurnIn { from { opacity: 0; transform: translateY(.4rem); } to { opacity: 1; transform: translateY(0); } }
-/* The app shell keeps its own 240px sidebar, so collapse the nested chat
-   history earlier than the generic mobile breakpoint. */
-@media (max-width: 1100px) {
-  .chat-workspace { display: flex; flex-direction: column; gap: 1rem; }
-  .chat-history { position: relative; top: auto; width: 100%; max-height: none; }
+/* When the answer surface would become cramped, switch the conversation
+   rail into a compact, horizontally browsable history strip. */
+@media (max-width: 960px) {
+  .chat-shell .topbar { display: flex; }
+  .chat-content { padding: 1.25rem 1rem; min-height: 0; }
+  .chat-workspace { min-height: 0; display: flex; flex-direction: column; gap: 1rem; }
+  .chat-history { position: relative; top: auto; width: 100%; min-height: 0; height: auto; border: 1px solid hsl(var(--border)); border-radius: .65rem; }
   .chat-history-list { display: flex; gap: .35rem; overflow-x: auto; padding: .5rem; min-height: auto; }
   .chat-history-item { min-width: 12.5rem; border: 1px solid hsl(var(--border)); }
   .chat-history-empty { min-height: auto; width: 100%; padding: .9rem; }
   .chat-history-empty svg, .chat-history-empty span { display: none; }
   .chat-history-foot { display: none; }
+  .chat-page { max-width: 62rem; padding: .25rem 0 0; }
 }
 @media (max-width: 560px) {
   .chat-conversation-head { padding-top: 0; }
