@@ -26,9 +26,11 @@
       <div class="circle">{{ m.icon("search", "icon-lg") }}</div>
       <p class="font-medium" style="font-size:1.05rem">条件に一致するスライドが見つかりませんでした</p>
       <p class="text-muted text-sm mt-2">検索キーワードを変更するか、フィルターの条件を緩めて再度お試しください。</p>
-      <button type="button" class="btn btn-outline mt-4" hx-get="/ui/search" hx-target="#facet-panel" hx-swap="innerHTML"
-        hx-include="[name='mode']"
-        hx-on:click="var el=document.querySelector('input[name=q]'); if(el) el.value='';">条件をクリア</button>
+      <button type="button" class="btn btn-outline mt-4" data-search-clear
+        hx-get="/ui/search" hx-target="#facet-content" hx-swap="innerHTML"
+        hx-include="[name='q'], #facet-state, [name='mode'], [name='source']">
+        条件をクリア
+      </button>
     </div>
     {% else %}
     <div class="slide-grid">

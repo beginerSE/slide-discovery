@@ -64,4 +64,12 @@
       {% endif %}
     </div>
   </div>
+  {% if created_at is defined and created_at %}
+  <time class="chat-turn-time" datetime="{{ created_at }}">
+    {{ created_at | jst("%Y/%m/%d %H:%M") }}
+  </time>
+  {% endif %}
 </div>
+{% if next_request_id is defined and next_request_id %}
+<input type="hidden" id="chat-request-id" name="requestId" value="{{ next_request_id }}" hx-swap-oob="outerHTML" />
+{% endif %}

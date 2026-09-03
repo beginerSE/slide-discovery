@@ -17,20 +17,20 @@
       </div>
       <nav class="sidebar-content">
         <div class="nav-label">メニュー</div>
-        <a href="/" class="nav-item {% if active_nav == '/' %}active{% endif %}">{{ m.icon("search") }}<span>スライド検索</span></a>
-        <a href="/chat" class="nav-item {% if active_nav == '/chat' %}active{% endif %}">{{ m.icon("message-circle") }}<span>対話検索</span></a>
-        <a href="/guide" class="nav-item {% if active_nav == '/guide' %}active{% endif %}">{{ m.icon("file-text") }}<span>使い方ガイド</span></a>
+        <a href="/" aria-label="スライド検索" title="スライド検索" class="nav-item {% if active_nav == '/' %}active{% endif %}">{{ m.icon("search") }}<span>スライド検索</span></a>
+        <a href="/chat" aria-label="対話検索" title="対話検索" class="nav-item {% if active_nav == '/chat' %}active{% endif %}">{{ m.icon("message-circle") }}<span>対話検索</span></a>
+        <a href="/guide" aria-label="使い方ガイド" title="使い方ガイド" class="nav-item {% if active_nav == '/guide' %}active{% endif %}">{{ m.icon("file-text") }}<span>使い方ガイド</span></a>
         {% if user and (user.role == 'admin' or user.canUpload) %}
-        <a href="/contribute" class="nav-item {% if active_nav == '/contribute' %}active{% endif %}">{{ m.icon("link") }}<span>リンク追加</span></a>
+        <a href="/contribute" aria-label="リンク追加" title="リンク追加" class="nav-item {% if active_nav == '/contribute' %}active{% endif %}">{{ m.icon("link") }}<span>リンク追加</span></a>
         {% endif %}
         {% if user and user.role == 'admin' %}
-        <a href="/admin" class="nav-item {% if active_nav == '/admin' %}active{% endif %}">{{ m.icon("cloud") }}<span>取り込み管理</span></a>
-        <a href="/admin/files" class="nav-item {% if active_nav == '/admin/files' %}active{% endif %}">{{ m.icon("files") }}<span>ファイル管理</span></a>
-        <a href="/admin/slides" class="nav-item {% if active_nav == '/admin/slides' %}active{% endif %}">{{ m.icon("list-checks") }}<span>メタデータ管理</span></a>
-        <a href="/admin/users" class="nav-item {% if active_nav == '/admin/users' %}active{% endif %}">{{ m.icon("user") }}<span>ユーザー管理</span></a>
-        <a href="/admin/logs" class="nav-item {% if active_nav == '/admin/logs' %}active{% endif %}">{{ m.icon("layers") }}<span>追加履歴</span></a>
-        <a href="/admin/guide" class="nav-item {% if active_nav == '/admin/guide' %}active{% endif %}">{{ m.icon("pencil") }}<span>ガイド編集</span></a>
-        <a href="/admin/site" class="nav-item {% if active_nav == '/admin/site' %}active{% endif %}">{{ m.icon("settings") }}<span>サイト管理</span></a>
+        <a href="/admin" aria-label="取り込み管理" title="取り込み管理" class="nav-item {% if active_nav == '/admin' %}active{% endif %}">{{ m.icon("cloud") }}<span>取り込み管理</span></a>
+        <a href="/admin/files" aria-label="ファイル管理" title="ファイル管理" class="nav-item {% if active_nav == '/admin/files' %}active{% endif %}">{{ m.icon("files") }}<span>ファイル管理</span></a>
+        <a href="/admin/slides" aria-label="メタデータ管理" title="メタデータ管理" class="nav-item {% if active_nav == '/admin/slides' %}active{% endif %}">{{ m.icon("list-checks") }}<span>メタデータ管理</span></a>
+        <a href="/admin/users" aria-label="ユーザー管理" title="ユーザー管理" class="nav-item {% if active_nav == '/admin/users' %}active{% endif %}">{{ m.icon("user") }}<span>ユーザー管理</span></a>
+        <a href="/admin/logs" aria-label="追加履歴" title="追加履歴" class="nav-item {% if active_nav == '/admin/logs' %}active{% endif %}">{{ m.icon("layers") }}<span>追加履歴</span></a>
+        <a href="/admin/guide" aria-label="ガイド編集" title="ガイド編集" class="nav-item {% if active_nav == '/admin/guide' %}active{% endif %}">{{ m.icon("pencil") }}<span>ガイド編集</span></a>
+        <a href="/admin/site" aria-label="サイト管理" title="サイト管理" class="nav-item {% if active_nav == '/admin/site' %}active{% endif %}">{{ m.icon("settings") }}<span>サイト管理</span></a>
         {% endif %}
       </nav>
       <div class="sidebar-footer">

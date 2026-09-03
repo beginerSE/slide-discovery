@@ -26,8 +26,38 @@
       {% for t in (slide.tags or [])[:2] %}<span class="tag-mini">#{{ t }}</span>{% endfor %}
       {% if (slide.tags or [])|length > 2 %}<span class="tag-mini" style="background:none">+{{ (slide.tags|length) - 2 }}</span>{% endif %}
     </div>
-    {% if highlight and slide.matchReason %}
-    <div class="match-reason"><span class="font-semibold">一致:</span> {{ slide.matchReason }}</div>
+    {% if highlight and (slide.matchEvidence or slide.matchSnippet or slide.matchReason) %}
+    <div class="match-reason" aria-label="検索との一致理由">
+      <div class="match-reason-head">
+        <span class="match-reason-label">一致の手がかり</span>
+        {% if slide.matchStrength %}
+        <span class="match-strength match-strength-{{ slide.matchStrength }}">
+          {% if slide.matchStrength == "strong" %}関連性が高い{% else %}関連あり{% endif %}
+        </span>
+        {% endif %}
+      </div>
+      {% if slide.matchEvidence %}
+      <ul class="match-evidence" aria-label="一致した項目">
+        {% for evidence in slide.matchEvidence %}
+        <li class="match-evidence-item">
+          <span class="match-field">{{ evidence.label }}</span>
+          {% if evidence.terms %}
+          <span class="match-terms">
+            {% for term in evidence.terms %}<span class="match-term">{{ term }}</span>{% endfor %}
+          </span>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      {% if slide.matchSnippet and slide.matchSnippet.parts %}
+      <div class="match-snippet">
+        <span class="match-snippet-label">{{ slide.matchSnippet.fieldLabel }}</span>
+        <span class="match-snippet-text">「{% for part in slide.matchSnippet.parts %}{% if part.matched %}<mark>{{ part.text }}</mark>{% else %}{{ part.text }}{% endif %}{% endfor %}」</span>
+      </div>
+      {% elif slide.matchReason %}
+      <div class="match-legacy">{{ slide.matchReason }}</div>
+      {% endif %}
     {% endif %}
     {% if slide.sourceType == "confluence" and slide.sourceUrl %}
     <a href="{{ slide.sourceUrl }}" class="card-source-open" target="_blank" rel="noopener noreferrer"
