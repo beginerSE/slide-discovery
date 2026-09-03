@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import User, get_session
+from perf_metrics import timed
 
 log = logging.getLogger("api.auth")
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -80,12 +81,14 @@ async def _iap_auto_login(request: Request, session: AsyncSession) -> User | Non
     取得（なければ自動作成）し、セッションを確立する。"""
     from iap_auth import verified_iap_email
 
-    email = await verified_iap_email(request)
+    with timed("auth_iap"):
+        email = await verified_iap_email(request)
     if not email:
         return None
-    user = (
-        await session.execute(select(User).where(User.email == email))
-    ).scalar_one_or_none()
+    with timed("auth_db"):
+        user = (
+            await session.execute(select(User).where(User.email == email))
+        ).scalar_one_or_none()
     if user is None:
         # 最初のユーザーを admin にする既存ルールは IAP 自動作成にも適用
         # （IAP 専用の新規環境でも管理者が存在できるように）。
@@ -121,7 +124,11 @@ async def _current_user_optional(
     import config as _config
 
     uid = request.session.get("user_id") if hasattr(request, "session") else None
-    user = await session.get(User, int(uid)) if uid else None
+    if uid:
+        with timed("auth_db"):
+            user = await session.get(User, int(uid))
+    else:
+        user = None
 
     if not _config.iap_enabled():
         return user
@@ -133,7 +140,8 @@ async def _current_user_optional(
     # キャッシュされるため、リクエストごとの再検証コストはほぼゼロ）。
     from iap_auth import verified_iap_email
 
-    email = await verified_iap_email(request)
+    with timed("auth_iap"):
+        email = await verified_iap_email(request)
     if not email:
         # 有効な IAP アサーションが無ければセッションがあっても未認証扱い
         if user is not None and hasattr(request, "session"):

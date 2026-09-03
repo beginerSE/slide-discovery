@@ -2,19 +2,22 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
-from collections import Counter
 from contextlib import asynccontextmanager, suppress
+from contextvars import ContextVar
+from datetime import timezone
 from pathlib import Path
+from time import monotonic, perf_counter
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sqlalchemy import func, select, text
+from sqlalchemy import func, literal, select, text, true, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -34,11 +37,25 @@ from db import (
 from gemini_embed import embed_text
 import thumbnail_store
 from ingest import reap_orphaned_jobs, schedule_backfill_embeddings
+from perf_metrics import (
+    add_timing,
+    begin_request,
+    current_timings,
+    end_request,
+    format_server_timing,
+    timed,
+)
 from search_query import (
     ParsedQuery,
     normalize_sources,
     parse_search_query,
-    query_matches,
+)
+from search_quality import (
+    SEMANTIC_MIN_SIMILARITY,
+    keyword_match_payload,
+    keyword_rank_sql,
+    semantic_fit_tier,
+    semantic_match_payload,
 )
 from scheduler import start_scheduler, stop_scheduler
 from thumbnail import render_thumbnail_svg
@@ -117,16 +134,35 @@ async def _initialize_backend() -> None:
     try:
         await init_db()
         await _seed_if_empty()
-        # Load admin-editable Confluence settings (DB) into config's cache so
-        # the resolved values are correct on the very first request.
-        try:
-            from confluence_settings import refresh_cache
-            from db import SessionLocal
+        from db import SessionLocal
 
-            async with SessionLocal() as _s:
+        async with SessionLocal() as _s:
+            # Load admin-editable Confluence settings (DB) into config's cache
+            # so the resolved values are correct on the very first request.
+            try:
+                from confluence_settings import refresh_cache
+
                 await refresh_cache(_s)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("confluence settings cache refresh failed: %s", exc)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("confluence settings cache refresh failed: %s", exc)
+            try:
+                # Warm the shared initial-search facet cache while the instance
+                # is starting in the background. The first user request should
+                # not pay for the corpus-wide aggregation.
+                await get_filters(
+                    q=None,
+                    industry=None,
+                    client=None,
+                    proposalType=None,
+                    graphType=None,
+                    layoutType=None,
+                    docCategory=None,
+                    tag=None,
+                    source=None,
+                    session=_s,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("search facet cache warm-up failed: %s", exc)
         # Clear jobs/files left "running"/"processing" by a previous process
         # that died mid-ingest, so they don't block scheduling or show forever.
         await reap_orphaned_jobs()
@@ -174,9 +210,31 @@ app.add_middleware(
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    response = await call_next(request)
-    log.info("%s %s -> %s", request.method, request.url.path, response.status_code)
-    return response
+    token = begin_request()
+    started = perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        total_ms = (perf_counter() - started) * 1000
+        add_timing("total", total_ms)
+        timings = current_timings()
+        server_timing = format_server_timing(timings)
+        if server_timing:
+            response.headers["Server-Timing"] = server_timing
+        response.headers["X-Response-Time"] = f"{total_ms:.1f}ms"
+        details = " ".join(f"{name}={duration:.1f}ms" for name, duration in timings)
+        log.info(
+            "%s %s -> %s %.1fms%s",
+            request.method,
+            request.url.path,
+            status_code,
+            total_ms,
+            f" [{details}]" if details else "",
+        )
+        return response
+    finally:
+        end_request(token)
 
 
 @app.get("/api/healthz")
@@ -197,34 +255,75 @@ async def _all_slides(session: AsyncSession) -> list[dict]:
     return [r.to_dict() for r in rows]
 
 
-def _match_reason_for(slide: dict, parsed: ParsedQuery) -> str:
-    terms = parsed.positive_terms
-    if not terms:
-        return ""
-    haystacks = [
-        ("slideTitle", slide["slideTitle"]),
-        ("summary", slide.get("summary", "")),
-        ("slideText", slide.get("slideText", "")),
-        ("tags", " ".join(slide.get("tags", []))),
-        ("client", slide.get("client", "")),
-        ("fileName", slide.get("fileName", "")),
-    ]
-    labels = {
-        "slideTitle": "タイトル一致",
-        "summary": "概要一致",
-        "slideText": "本文一致",
-        "tags": "タグ一致",
-        "client": "クライアント一致",
-        "fileName": "ファイル名一致",
+_SLIDE_CARD_COLUMNS = (
+    Slide.slide_id,
+    Slide.file_id,
+    Slide.file_name,
+    Slide.page_no,
+    Slide.slide_title,
+    Slide.industry,
+    Slide.client,
+    Slide.proposal_type,
+    Slide.graph_type,
+    Slide.layout_type,
+    Slide.doc_category,
+    Slide.tags,
+    Slide.thumbnail_path,
+    Slide.source_url,
+    Slide.source_type,
+    Slide.access_level,
+    Slide.folder_id,
+    Slide.folder_name,
+    Slide.doc_date,
+    Slide.created_at,
+    Slide.updated_at,
+)
+
+
+def _slide_card_dict(row) -> dict:
+    """Serialize a lightweight selected-column row for slide-card templates."""
+    values = row._mapping
+
+    def iso(value):
+        return (
+            value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            if value
+            else None
+        )
+
+    doc_date = values[Slide.doc_date]
+    return {
+        "slideId": values[Slide.slide_id],
+        "fileId": values[Slide.file_id],
+        "fileName": values[Slide.file_name],
+        "pageNo": values[Slide.page_no],
+        "slideTitle": values[Slide.slide_title],
+        "slideText": "",
+        "industry": values[Slide.industry],
+        "client": values[Slide.client],
+        "proposalType": values[Slide.proposal_type],
+        "graphType": values[Slide.graph_type],
+        "layoutType": values[Slide.layout_type],
+        "docCategory": values[Slide.doc_category],
+        "tags": list(values[Slide.tags] or []),
+        "summary": "",
+        "reuseHint": "",
+        "thumbnailPath": values[Slide.thumbnail_path],
+        "sourceUrl": values[Slide.source_url],
+        "sourceType": values[Slide.source_type],
+        "accessLevel": values[Slide.access_level],
+        "folderId": values[Slide.folder_id],
+        "folderName": values[Slide.folder_name],
+        "docDate": doc_date.isoformat() if doc_date else None,
+        "createdAt": iso(values[Slide.created_at]),
+        "updatedAt": iso(values[Slide.updated_at]),
     }
-    # Report the field/term of the first positive term that hits, so the
-    # reason stays meaningful for multi-term (AND/OR) queries.
-    for term in terms:
-        needle = term.lower()
-        for field_name, value in haystacks:
-            if value and needle in value.lower():
-                return f'{labels[field_name]}: 「{term}」'
-    return f'一致: 「{terms[0]}」'
+
+
+_wide_semantic_retrieval: ContextVar[bool] = ContextVar(
+    "wide_semantic_retrieval",
+    default=False,
+)
 
 
 def _build_keyword_where(parsed: ParsedQuery) -> tuple[Optional[str], dict]:
@@ -246,8 +345,7 @@ def _build_keyword_where(parsed: ParsedQuery) -> tuple[Optional[str], dict]:
         # whitespace. For phrases, FTS would match the tokens anywhere
         # (non-adjacent), breaking phrase semantics and diverging from
         # the substring-based facet counts in /api/filters. So phrases
-        # use substring ILIKE only — which is exactly what query_matches
-        # does in-memory, keeping search and facet counts consistent.
+        # use substring ILIKE only, keeping search and facet counts consistent.
         if " " in term:
             return f"({SEARCH_EXPR} ILIKE :{p}_like)"
         params[f"{p}_fts"] = term
@@ -356,7 +454,8 @@ async def search_slides(
         # are applied as hard NOT filters below.
         embed_query = " ".join(parsed.positive_terms) or q_clean
         try:
-            qvec = await embed_text(embed_query, task_type="RETRIEVAL_QUERY")
+            with timed("ai_embed"):
+                qvec = await embed_text(embed_query, task_type="RETRIEVAL_QUERY")
         except Exception as e:
             log.warning("semantic embed failed, falling back to keyword: %s", e)
             qvec = None
@@ -364,6 +463,15 @@ async def search_slides(
             distance = Slide.embedding.cosine_distance(qvec).label("distance")
             sem_stmt = select(Slide, distance).where(Slide.embedding.is_not(None))
             sem_stmt = _apply_facets(sem_stmt)
+            # Public semantic search excludes the weak tail entirely, including
+            # from the reported total. Conversational retrieval opts out below
+            # so detailed answers and recurring-series inference keep the broad
+            # source window they were designed around.
+            wide_retrieval = _wide_semantic_retrieval.get()
+            if not wide_retrieval:
+                sem_stmt = sem_stmt.where(
+                    distance <= 1.0 - SEMANTIC_MIN_SIMILARITY
+                )
             # Honour exclusion terms even in semantic mode.
             for i, term in enumerate(parsed.excludes):
                 sem_stmt = sem_stmt.where(
@@ -371,19 +479,120 @@ async def search_slides(
                         **{f"sem_excl_{i}": f"%{term}%"}
                     )
                 )
-            count_stmt = select(func.count()).select_from(sem_stmt.subquery())
-            total = (await session.execute(count_stmt)).scalar() or 0
-            sem_stmt = sem_stmt.order_by(distance.asc()).limit(limit).offset(offset)
-            rows = (await session.execute(sem_stmt)).all()
+            sem_stmt = sem_stmt.order_by(
+                distance.asc(),
+                Slide.created_at.desc(),
+            )
+            if wide_retrieval:
+                total_count = func.count().over().label("total_count")
+                paged_stmt = (
+                    sem_stmt.add_columns(total_count)
+                    .limit(limit)
+                    .offset(offset)
+                )
+                with timed("db_search"):
+                    wide_rows = (await session.execute(paged_stmt)).all()
+                rows = [
+                    (slide_row, dist, None)
+                    for slide_row, dist, _row_total in wide_rows
+                ]
+                if wide_rows:
+                    total = int(wide_rows[0][2])
+                elif offset:
+                    with timed("db_search_count"):
+                        total = int(
+                            (
+                                await session.execute(
+                                    select(func.count()).select_from(
+                                        sem_stmt.subquery()
+                                    )
+                                )
+                            ).scalar()
+                            or 0
+                        )
+                else:
+                    total = 0
+            else:
+                # Public search applies a second, context-aware stage after the
+                # absolute floor. Fetch lightweight candidates first so the
+                # accepted total is exact before pagination.
+                candidate_stmt = sem_stmt.with_only_columns(
+                    Slide.slide_id,
+                    Slide.file_id,
+                    Slide.folder_id,
+                    Slide.industry,
+                    Slide.proposal_type,
+                    Slide.doc_category,
+                    distance,
+                    maintain_column_froms=True,
+                )
+                with timed("db_search"):
+                    candidate_rows = (
+                        await session.execute(candidate_stmt)
+                    ).all()
+                accepted: list[tuple[str, float, str]] = []
+                if candidate_rows:
+                    leader_row = candidate_rows[0]
+                    leader = {
+                        "slideId": leader_row.slide_id,
+                        "fileId": leader_row.file_id,
+                        "folderId": leader_row.folder_id,
+                        "industry": leader_row.industry,
+                        "proposalType": leader_row.proposal_type,
+                        "docCategory": leader_row.doc_category,
+                    }
+                    leader_similarity = 1.0 - float(leader_row.distance)
+                    for row in candidate_rows:
+                        similarity = 1.0 - float(row.distance)
+                        candidate = {
+                            "slideId": row.slide_id,
+                            "fileId": row.file_id,
+                            "folderId": row.folder_id,
+                            "industry": row.industry,
+                            "proposalType": row.proposal_type,
+                            "docCategory": row.doc_category,
+                        }
+                        tier = semantic_fit_tier(
+                            candidate,
+                            leader,
+                            similarity,
+                            leader_similarity,
+                        )
+                        if tier:
+                            accepted.append((row.slide_id, similarity, tier))
+                total = len(accepted)
+                page = accepted[offset : offset + limit]
+                page_ids = [slide_id for slide_id, _, _ in page]
+                if page_ids:
+                    with timed("db_search_page"):
+                        page_slides = (
+                            (
+                                await session.execute(
+                                    select(Slide).where(
+                                        Slide.slide_id.in_(page_ids)
+                                    )
+                                )
+                            )
+                            .scalars()
+                            .all()
+                        )
+                    slides_by_id = {
+                        slide.slide_id: slide for slide in page_slides
+                    }
+                    rows = [
+                        (slides_by_id[slide_id], 1.0 - similarity, tier)
+                        for slide_id, similarity, tier in page
+                    ]
+                else:
+                    rows = []
             items: list[dict] = []
-            for slide_row, dist in rows:
+            for slide_row, dist, fit_tier in rows:
                 s = slide_row.to_dict()
                 similarity = max(0.0, min(1.0, 1.0 - float(dist)))
                 s["similarityScore"] = round(similarity, 3)
-                s["matchReason"] = (
-                    f"自然文検索: 「{q_clean}」と意味が近い "
-                    f"(類似度 {s['similarityScore']:.2f})"
-                )
+                if fit_tier:
+                    s["semanticFitTier"] = fit_tier
+                s.update(semantic_match_payload(s, parsed, similarity))
                 items.append(s)
             return {"total": int(total), "items": items}
 
@@ -402,22 +611,50 @@ async def search_slides(
         if where_sql:
             stmt = stmt.where(text(where_sql).bindparams(**where_params))
 
-    count_stmt = select(func.count()).select_from(stmt.subquery())
-    total = (await session.execute(count_stmt)).scalar() or 0
-
-    stmt = stmt.order_by(Slide.created_at.desc()).limit(limit).offset(offset)
-    rows = (await session.execute(stmt)).scalars().all()
+    total_count = func.count().over().label("total_count")
+    stmt = stmt.add_columns(total_count)
+    if q_clean:
+        rank_sql, rank_params = keyword_rank_sql(parsed)
+        stmt = stmt.order_by(
+            text(f"({rank_sql}) DESC").bindparams(**rank_params),
+            Slide.created_at.desc(),
+            Slide.slide_id.asc(),
+        )
+    else:
+        stmt = stmt.order_by(Slide.created_at.desc(), Slide.slide_id.asc())
+    stmt = stmt.limit(limit).offset(offset)
+    with timed("db_search"):
+        rows = (await session.execute(stmt)).all()
+    if rows:
+        total = int(rows[0][1])
+    elif offset:
+        with timed("db_search_count"):
+            total = int(
+                (
+                    await session.execute(
+                        select(func.count()).select_from(
+                            stmt.limit(None).offset(None).subquery()
+                        )
+                    )
+                ).scalar()
+                or 0
+            )
+    else:
+        total = 0
 
     items = []
-    for row in rows:
+    for row, _row_total in rows:
         s = row.to_dict()
         if q_clean:
-            match_reason = _match_reason_for(s, parsed)
+            s.update(keyword_match_payload(s, parsed))
         elif facet_label:
-            match_reason = f"フィルター一致: {facet_label}"
+            s["matchReason"] = f"フィルター一致: {facet_label}"
+            s["matchEvidence"] = []
+            s["matchSnippet"] = None
         else:
-            match_reason = "全件表示"
-        s["matchReason"] = match_reason
+            s["matchReason"] = "全件表示"
+            s["matchEvidence"] = []
+            s["matchSnippet"] = None
         items.append(s)
     return {"total": int(total), "items": items}
 
@@ -443,15 +680,30 @@ async def ask_question(
     if not question:
         raise HTTPException(status_code=400, detail="question required")
 
+    from gemini_chat import generate_answer, is_overview_question, should_use_series
+    from series import recent_series_context
+
+    # 概要・経緯タイプの質問（「概要を教えて」「これまでの経緯は?」）は、
+    # ピンポイント検索ではなく統合的・詳細な説明モードで扱う。
+    overview = is_overview_question(question)
+
     top_k = max(1, min(int(body.topK or 8), 20))
-    res = await search_slides(
-        q=question,
-        mode="semantic",
-        limit=top_k,
-        offset=0,
-        source=body.sources,
-        session=session,
-    )
+    if overview:
+        # 俯瞰質問は材料が多いほど良い（シリーズが特定できない場合の保険も兼ねる）
+        top_k = max(top_k, 16)
+    with timed("chat_retrieval"):
+        token = _wide_semantic_retrieval.set(True)
+        try:
+            res = await search_slides(
+                q=question,
+                mode="semantic",
+                limit=top_k,
+                offset=0,
+                source=body.sources,
+                session=session,
+            )
+        finally:
+            _wide_semantic_retrieval.reset(token)
     sources = res["items"]
     if not sources:
         return {
@@ -459,10 +711,8 @@ async def ask_question(
             "answer": "該当する資料は見つかりませんでした。",
             "sources": [],
             "degraded": False,
+            "topK": top_k,
         }
-
-    from gemini_chat import generate_answer, should_use_series
-    from series import recent_series_context
 
     # Detect the 定例シリーズ (recurring-meeting series = Drive folder): use an
     # explicit seriesId if given, else infer it from the top hit's folder.
@@ -474,7 +724,15 @@ async def ask_question(
     series_name = ""
     if series_id:
         try:
-            series_context = await recent_series_context(session, series_id)
+            # 概要モードはシリーズ全体を広く読む（ファイル数・枚数とも拡大）
+            if overview:
+                with timed("db_series"):
+                    series_context = await recent_series_context(
+                        session, series_id, limit_files=12, per_file=8
+                    )
+            else:
+                with timed("db_series"):
+                    series_context = await recent_series_context(session, series_id)
             # Prefer a name already in the retrieved sources; otherwise (e.g.
             # an explicit seriesId whose folder is absent from the top hits)
             # look it up so the UI label is correct.
@@ -500,7 +758,8 @@ async def ask_question(
             # folder's dated files) plus the question — whether the series'
             # time-series flow is actually relevant. An explicit user choice is
             # always honored and skips the judge.
-            if not explicit_series and series_context:
+            # 概要モードでは時系列こそが本題なので判定をスキップして常に使う。
+            if not explicit_series and series_context and not overview:
                 keep = await should_use_series(
                     question, series_name, series_context
                 )
@@ -512,9 +771,10 @@ async def ask_question(
     answer: Optional[str] = None
     degraded = False
     try:
-        answer = await generate_answer(
-            question, sources, series=series_context or None
-        )
+        with timed("ai_answer"):
+            answer = await generate_answer(
+                question, sources, series=series_context or None, overview=overview
+            )
     except Exception as e:
         log.warning("ask: answer generation failed: %s", e)
         degraded = True
@@ -526,6 +786,7 @@ async def ask_question(
         "seriesId": series_id,
         "seriesName": series_name,
         "seriesCount": len(series_context),
+        "topK": top_k,
     }
 
 
@@ -539,57 +800,79 @@ async def get_slide(slide_id: str, session: AsyncSession = Depends(get_session))
 
 @app.get("/api/slides/{slide_id}/similar")
 async def get_similar(slide_id: str, session: AsyncSession = Depends(get_session)):
-    src_row = await session.get(Slide, slide_id)
+    with timed("db_slide"):
+        src_row = await session.get(Slide, slide_id)
     if not src_row:
         raise HTTPException(status_code=404, detail="slide not found")
+    return await _get_similar_for_row(src_row, session)
+
+
+async def _get_similar_for_row(
+    src_row: Slide, session: AsyncSession, *, compact: bool = False
+) -> list[dict]:
+    slide_id = src_row.slide_id
     src = src_row.to_dict()
     src_tags = set(src.get("tags", []))
 
-    # Vector distances (cosine) — keyed by slide_id, if source has an embedding.
-    vec_sim: dict[str, float] = {}
+    # Fetch only the columns needed to score candidates. The previous
+    # implementation loaded every slide's full text and embedding into Python,
+    # which made a detail-page navigation scale with the entire corpus payload.
+    columns = (
+        Slide.slide_id,
+        Slide.industry,
+        Slide.proposal_type,
+        Slide.graph_type,
+        Slide.layout_type,
+        Slide.doc_category,
+        Slide.tags,
+    )
     src_vec = src_row.embedding
     if src_vec is not None:
         distance = Slide.embedding.cosine_distance(src_vec).label("distance")
-        stmt = (
-            select(Slide.slide_id, distance)
-            .where(Slide.embedding.is_not(None))
-            .where(Slide.slide_id != slide_id)
-        )
-        for sid, dist in (await session.execute(stmt)).all():
-            vec_sim[sid] = max(0.0, min(1.0, 1.0 - float(dist)))
+        candidate_stmt = select(*columns, distance).where(Slide.slide_id != slide_id)
+    else:
+        candidate_stmt = select(*columns).where(Slide.slide_id != slide_id)
 
-    all_slides = await _all_slides(session)
-    scored = []
-    for s in all_slides:
-        if s["slideId"] == slide_id:
-            continue
+    with timed("db_similar_candidates"):
+        candidate_rows = (await session.execute(candidate_stmt)).all()
+
+    scored: list[tuple[str, float, list[str]]] = []
+    for row in candidate_rows:
+        sid = row[0]
+        industry = row[1] or ""
+        proposal_type = row[2] or ""
+        graph_type = row[3] or ""
+        layout_type = row[4] or ""
+        doc_category = row[5] or ""
+        tags = list(row[6] or [])
+        dist = row[7] if src_vec is not None else None
         score = 0.0
         reasons: list[str] = []
-        if s["industry"] == src["industry"]:
+        if industry == src["industry"]:
             score += 1
-            reasons.append(f'業界が同じ ({s["industry"]})')
-        if s["proposalType"] == src["proposalType"]:
+            reasons.append(f"業界が同じ ({industry})")
+        if proposal_type == src["proposalType"]:
             score += 1
-            reasons.append(f'スライド種別が同じ ({s["proposalType"]})')
-        if s["graphType"] == src["graphType"] and s["graphType"] != "なし":
+            reasons.append(f"スライド種別が同じ ({proposal_type})")
+        if graph_type == src["graphType"] and graph_type != "なし":
             score += 2
-            reasons.append(f'グラフ種別が同じ ({s["graphType"]})')
-        if s["layoutType"] == src["layoutType"]:
+            reasons.append(f"グラフ種別が同じ ({graph_type})")
+        if layout_type == src["layoutType"]:
             score += 2
-            reasons.append(f'構図が同じ ({s["layoutType"]})')
-        if s.get("docCategory") and s.get("docCategory") == src.get("docCategory"):
+            reasons.append(f"構図が同じ ({layout_type})")
+        if doc_category and doc_category == src.get("docCategory"):
             score += 1
-            reasons.append(f'資料種別が同じ ({s["docCategory"]})')
-        overlap = src_tags & set(s.get("tags", []))
+            reasons.append(f"資料種別が同じ ({doc_category})")
+        overlap = src_tags & set(tags)
         if overlap:
             score += len(overlap)
             reasons.append(f'共通タグ: {"、".join(sorted(overlap))}')
 
-        # Facet/tag score normalized to 0..1 (cap at 8 like before).
         facet_score = min(score / 8.0, 1.0)
-        sem_score = vec_sim.get(s["slideId"])
+        sem_score = (
+            max(0.0, min(1.0, 1.0 - float(dist))) if dist is not None else None
+        )
         if sem_score is not None:
-            # Blend: 60% facets/tags, 40% semantic similarity.
             combined = 0.6 * facet_score + 0.4 * sem_score
             if sem_score >= 0.6:
                 reasons.append(f'意味が近い (類似度 {sem_score:.2f})')
@@ -598,12 +881,46 @@ async def get_similar(slide_id: str, session: AsyncSession = Depends(get_session
 
         if combined <= 0 and not reasons:
             continue
-        item = dict(s)
+        scored.append((sid, combined, reasons))
+
+    scored.sort(key=lambda item: item[1], reverse=True)
+    top = scored[:8]
+    if not top:
+        return []
+    top_ids = [sid for sid, _score, _reasons in top]
+    with timed("db_similar_results"):
+        if compact:
+            result_rows = (
+                await session.execute(
+                    select(*_SLIDE_CARD_COLUMNS).where(Slide.slide_id.in_(top_ids))
+                )
+            ).all()
+            by_id = {
+                row._mapping[Slide.slide_id]: _slide_card_dict(row)
+                for row in result_rows
+            }
+        else:
+            full_rows = (
+                await session.execute(
+                    select(Slide).where(Slide.slide_id.in_(top_ids))
+                )
+            ).scalars().all()
+            by_id = {row.slide_id: row.to_dict() for row in full_rows}
+    out: list[dict] = []
+    for sid, combined, reasons in top:
+        item = by_id.get(sid)
+        if item is None:
+            continue
+        item = dict(item)
         item["similarityScore"] = round(combined, 3)
         item["similarityReason"] = " / ".join(reasons) if reasons else "意味が近い"
-        scored.append(item)
-    scored.sort(key=lambda x: x["similarityScore"], reverse=True)
-    return scored[:8]
+        out.append(item)
+    return out
+
+
+_BASE_FILTERS_CACHE_TTL = 60.0
+_base_filters_cache: tuple[float, dict] | None = None
+_base_filters_lock = asyncio.Lock()
 
 
 @app.get("/api/filters")
@@ -628,38 +945,11 @@ async def get_filters(
     fields they're actively narrowing on, and they can still discover
     other values within the same field)."""
 
+    global _base_filters_cache
+
     q_clean = (q or "").strip()
-    slides = await _all_slides(session)
-    # Keep facet counts consistent with the パワポ / コンフル search filter.
     source_restrict = normalize_sources(source)
-    if source_restrict is not None:
-        slides = [s for s in slides if s.get("sourceType") in source_restrict]
     parsed = parse_search_query(q_clean)
-
-    # Pre-filter once with q. Uses the same AND/OR/exclusion parsing as
-    # the search endpoint so facet counts agree with actual results.
-    def _matches_query(s: dict) -> bool:
-        if parsed.is_empty:
-            return True
-        haystack = " ".join(
-            [
-                s.get("slideTitle") or "",
-                s.get("slideText") or "",
-                s.get("summary") or "",
-                s.get("fileName") or "",
-                " ".join(s.get("tags") or []),
-                s.get("industry") or "",
-                s.get("client") or "",
-                s.get("proposalType") or "",
-                s.get("graphType") or "",
-                s.get("layoutType") or "",
-                s.get("docCategory") or "",
-            ]
-        )
-        return query_matches(parsed, haystack)
-
-    q_filtered = [s for s in slides if _matches_query(s)]
-
     selected = {
         "industry": industry,
         "client": client,
@@ -669,71 +959,178 @@ async def get_filters(
         "docCategory": docCategory,
         "tag": tag,
     }
+    cacheable = (
+        not q_clean
+        and not any(selected.values())
+        and source_restrict is None
+    )
+    now = monotonic()
+    if cacheable and _base_filters_cache is not None:
+        cached_at, cached = _base_filters_cache
+        if now - cached_at < _BASE_FILTERS_CACHE_TTL:
+            return copy.deepcopy(cached)
 
-    def _apply_others(rows: list[dict], skip_field: str) -> list[dict]:
-        """Apply every active filter except the one for skip_field."""
-        out = rows
-        if skip_field != "industry" and selected["industry"]:
-            out = [s for s in out if s.get("industry") == selected["industry"]]
-        if skip_field != "client" and selected["client"]:
-            out = [s for s in out if s.get("client") == selected["client"]]
-        if skip_field != "proposalType" and selected["proposalType"]:
-            out = [s for s in out if s.get("proposalType") == selected["proposalType"]]
-        if skip_field != "graphType" and selected["graphType"]:
-            out = [s for s in out if s.get("graphType") == selected["graphType"]]
-        if skip_field != "layoutType" and selected["layoutType"]:
-            out = [s for s in out if s.get("layoutType") == selected["layoutType"]]
-        if skip_field != "docCategory" and selected["docCategory"]:
-            out = [s for s in out if s.get("docCategory") == selected["docCategory"]]
-        if skip_field != "tag" and selected["tag"]:
-            out = [s for s in out if selected["tag"] in (s.get("tags") or [])]
-        return out
+    async def _compute() -> dict:
+        where_sql, where_params = _build_keyword_where(parsed)
+        columns = {
+            "industry": Slide.industry,
+            "client": Slide.client,
+            "proposalType": Slide.proposal_type,
+            "graphType": Slide.graph_type,
+            "layoutType": Slide.layout_type,
+            "docCategory": Slide.doc_category,
+        }
 
-    def facet(field: str) -> list[dict]:
-        rows = _apply_others(q_filtered, field)
-        c = Counter(s[field] for s in rows if s.get(field))
-        return [{"value": v, "count": n} for v, n in c.most_common()]
+        def apply_context(stmt, skip_field: str | None = None):
+            if source_restrict is not None:
+                stmt = stmt.where(Slide.source_type.in_(source_restrict))
+            if where_sql:
+                stmt = stmt.where(text(where_sql).bindparams(**where_params))
+            for field, column in columns.items():
+                value = selected[field]
+                if field != skip_field and value:
+                    stmt = stmt.where(column == value)
+            if skip_field != "tag" and selected["tag"]:
+                stmt = stmt.where(
+                    text("tags @> CAST(:facet_tag_json AS jsonb)").bindparams(
+                        facet_tag_json=json.dumps([selected["tag"]])
+                    )
+                )
+            return stmt
 
-    tag_rows = _apply_others(q_filtered, "tag")
-    tags_counter: Counter[str] = Counter()
-    for s in tag_rows:
-        tags_counter.update(s.get("tags") or [])
-    # Cap tag chips at 40 so the panel doesn't explode when the dataset
-    # grows; the most common tags are what users actually scan for.
-    tag_facets = [
-        {"value": v, "count": n} for v, n in tags_counter.most_common(40)
-    ]
+        statements = []
+        for field, column in columns.items():
+            stmt = select(
+                literal(field).label("facet"),
+                column.label("value"),
+                func.count().label("count"),
+            ).where(column != "")
+            statements.append(apply_context(stmt, field).group_by(column))
 
-    return {
-        "industries": facet("industry"),
-        "clients": facet("client"),
-        "proposalTypes": facet("proposalType"),
-        "graphTypes": facet("graphType"),
-        "layoutTypes": facet("layoutType"),
-        "docCategories": facet("docCategory"),
-        "tags": tag_facets,
-    }
+        tag_values = (
+            func.jsonb_array_elements_text(Slide.tags)
+            .table_valued("value")
+            .alias("tag_values")
+        )
+        tag_stmt = (
+            select(
+                literal("tag").label("facet"),
+                tag_values.c.value.label("value"),
+                func.count().label("count"),
+            )
+            .select_from(Slide)
+            .join(tag_values, true())
+            .where(tag_values.c.value != "")
+        )
+        tag_stmt = apply_context(tag_stmt, "tag").group_by(tag_values.c.value)
+        tag_grouped = tag_stmt.order_by(func.count().desc()).limit(40).subquery()
+        statements.append(
+            select(
+                tag_grouped.c.facet,
+                tag_grouped.c.value,
+                tag_grouped.c.count,
+            )
+        )
+
+        # Corpus metadata rides on the same round trip. It is deliberately
+        # independent of active filters: source-toggle visibility and home-page
+        # totals describe the whole indexed corpus.
+        statements.extend(
+            [
+                select(
+                    literal("_source").label("facet"),
+                    Slide.source_type.label("value"),
+                    func.count().label("count"),
+                ).group_by(Slide.source_type),
+                select(
+                    literal("_meta").label("facet"),
+                    literal("totalSlides").label("value"),
+                    func.count(Slide.slide_id).label("count"),
+                ),
+                select(
+                    literal("_meta").label("facet"),
+                    literal("totalFiles").label("value"),
+                    func.count(func.distinct(Slide.file_id)).label("count"),
+                ),
+            ]
+        )
+
+        grouped = union_all(*statements).subquery()
+        aggregate_stmt = select(
+            grouped.c.facet, grouped.c.value, grouped.c.count
+        ).order_by(grouped.c.facet, grouped.c.count.desc(), grouped.c.value)
+        with timed("db_filters"):
+            rows = (await session.execute(aggregate_stmt)).all()
+
+        keys = {
+            "industry": "industries",
+            "client": "clients",
+            "proposalType": "proposalTypes",
+            "graphType": "graphTypes",
+            "layoutType": "layoutTypes",
+            "docCategory": "docCategories",
+            "tag": "tags",
+        }
+        result = {key: [] for key in keys.values()}
+        result.update(totalSlides=0, totalFiles=0, hasConfluence=False)
+        for facet_name, value, count in rows:
+            count = int(count or 0)
+            if facet_name in keys:
+                result[keys[facet_name]].append({"value": value, "count": count})
+            elif facet_name == "_source" and value == "confluence" and count > 0:
+                result["hasConfluence"] = True
+            elif facet_name == "_meta" and value in ("totalSlides", "totalFiles"):
+                result[value] = count
+        return result
+
+    if not cacheable:
+        return await _compute()
+    async with _base_filters_lock:
+        now = monotonic()
+        if _base_filters_cache is not None:
+            cached_at, cached = _base_filters_cache
+            if now - cached_at < _BASE_FILTERS_CACHE_TTL:
+                return copy.deepcopy(cached)
+        computed = await _compute()
+        _base_filters_cache = (monotonic(), computed)
+        return copy.deepcopy(computed)
 
 
 @app.get("/api/stats")
 async def get_stats(session: AsyncSession = Depends(get_session)):
-    slides = await _all_slides(session)
-    files = {s["fileId"] for s in slides}
-    recent = sorted(slides, key=lambda s: s["createdAt"], reverse=True)[:6]
+    filters = await get_filters(
+        q=None,
+        industry=None,
+        client=None,
+        proposalType=None,
+        graphType=None,
+        layoutType=None,
+        docCategory=None,
+        tag=None,
+        source=None,
+        session=session,
+    )
+    return await build_stats(session, filters)
 
-    def facet(field: str) -> list[dict]:
-        c = Counter(s[field] for s in slides if s.get(field))
-        return [{"value": v, "count": n} for v, n in c.most_common()]
 
+async def build_stats(session: AsyncSession, filters: dict) -> dict:
+    with timed("db_recent"):
+        recent_rows = (
+            await session.execute(
+                select(*_SLIDE_CARD_COLUMNS)
+                .order_by(Slide.created_at.desc())
+                .limit(6)
+            )
+        ).all()
     return {
-        "totalSlides": len(slides),
-        "totalFiles": len(files),
-        "industries": facet("industry"),
-        "proposalTypes": facet("proposalType"),
-        "graphTypes": facet("graphType"),
-        "layoutTypes": facet("layoutType"),
-        "docCategories": facet("docCategory"),
-        "recentSlides": recent,
+        "totalSlides": int(filters.get("totalSlides") or 0),
+        "totalFiles": int(filters.get("totalFiles") or 0),
+        "industries": filters.get("industries") or [],
+        "proposalTypes": filters.get("proposalTypes") or [],
+        "graphTypes": filters.get("graphTypes") or [],
+        "layoutTypes": filters.get("layoutTypes") or [],
+        "docCategories": filters.get("docCategories") or [],
+        "recentSlides": [_slide_card_dict(row) for row in recent_rows],
     }
 
 

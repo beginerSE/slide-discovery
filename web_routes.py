@@ -27,10 +27,14 @@ from auth import (
 )
 from csrf import csrf_context, verify_csrf
 from db import DriveFile, SessionLocal, Slide
+from perf_metrics import timed
 from series import extract_doc_date
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy import delete as sql_delete
+from sqlalchemy.exc import IntegrityError
+
+import chat_history
 
 BASE_DIR = Path(__file__).parent
 templates = Jinja2Templates(
@@ -154,13 +158,14 @@ def _read_sources(request: Request) -> list[str]:
 async def _has_confluence(session) -> bool:
     """True when at least one Confluence page has been ingested, so the UI only
     surfaces the パワポ / コンフル toggle when it is actually meaningful."""
-    row = (
-        await session.execute(
-            select(Slide.slide_id)
-            .where(Slide.source_type == "confluence")
-            .limit(1)
-        )
-    ).first()
+    with timed("db_source_check"):
+        row = (
+            await session.execute(
+                select(Slide.slide_id)
+                .where(Slide.source_type == "confluence")
+                .limit(1)
+            )
+        ).first()
     return row is not None
 
 
@@ -209,7 +214,7 @@ async def _search_context(
         "facets": facets,
         "mode": mode,
         "sources": sources,
-        "has_confluence": await _has_confluence(session),
+        "has_confluence": bool(filters.get("hasConfluence")),
         "has_active": has_active,
         "has_query": has_query,
         "filters": filters,
@@ -232,7 +237,7 @@ async def _search_context(
         ctx["items"] = res["items"]
         ctx["total"] = res["total"]
     else:
-        ctx["stats"] = await main.get_stats(session=session)
+        ctx["stats"] = await main.build_stats(session, filters)
     return ctx
 
 
@@ -248,7 +253,8 @@ async def home(request: Request):
         sources = _read_sources(request)
         ctx = await _search_context(session, q, facets, mode, sources)
         ctx.update(request=request, user=_user_dict(user), active_nav="/")
-        return templates.TemplateResponse(request, "home.html", ctx)
+        with timed("template"):
+            return templates.TemplateResponse(request, "home.html", ctx)
 
 
 @web_router.get("/ui/search", response_class=HTMLResponse)
@@ -263,7 +269,10 @@ async def ui_search(request: Request):
         sources = _read_sources(request)
         ctx = await _search_context(session, q, facets, mode, sources)
         ctx.update(request=request)
-        return templates.TemplateResponse(request, "_search_response.html", ctx)
+        with timed("template"):
+            return templates.TemplateResponse(
+                request, "_search_response.html", ctx
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -274,13 +283,14 @@ async def ui_search(request: Request):
 async def _series_options(session) -> list[dict]:
     """Distinct 定例シリーズ (Drive folders) that have ingested slides, for the
     chat series picker. Ordered by display name."""
-    rows = (
-        await session.execute(
-            select(Slide.folder_id, Slide.folder_name)
-            .where(Slide.folder_id != "")
-            .distinct()
-        )
-    ).all()
+    with timed("db_series_options"):
+        rows = (
+            await session.execute(
+                select(Slide.folder_id, Slide.folder_name)
+                .where(Slide.folder_id != "")
+                .distinct()
+            )
+        ).all()
     options = [
         {"id": fid, "name": fname or fid}
         for fid, fname in rows
@@ -296,18 +306,56 @@ async def chat_page(request: Request):
         user = await _current_user_optional(request, session)
         if user is None:
             return _login_redirect(request)
-        series = await _series_options(session)
-        return templates.TemplateResponse(
-            request,
-            "chat.html",
-            {
-                "request": request,
-                "user": _user_dict(user),
-                "active_nav": "/chat",
-                "series_options": series,
-                "has_confluence": await _has_confluence(session),
-            },
+        conversation_id = (
+            request.query_params.get("conversation") or ""
+        ).strip()
+        active_row = None
+        turns: list[dict] = []
+        if conversation_id:
+            active_row = await chat_history.get_conversation(
+                session, user.id, conversation_id
+            )
+            if active_row is None:
+                return templates.TemplateResponse(
+                    request,
+                    "not_found.html",
+                    {
+                        "request": request,
+                        "user": _user_dict(user),
+                        "active_nav": "/chat",
+                    },
+                    status_code=404,
+                )
+            turns = await chat_history.list_turns(
+                session, user.id, conversation_id
+            )
+        conversations = await chat_history.list_conversations(
+            session, user.id, active_id=conversation_id or None
         )
+        series = await _series_options(session)
+        has_confluence = await _has_confluence(session)
+        with timed("template"):
+            return templates.TemplateResponse(
+                request,
+                "chat.html",
+                {
+                    "request": request,
+                    "user": _user_dict(user),
+                    "active_nav": "/chat",
+                    "series_options": series,
+                    "has_confluence": has_confluence,
+                    "conversations": conversations,
+                    "active_conversation": (
+                        active_row.to_dict(
+                            turn_count=len(turns), active=True
+                        )
+                        if active_row
+                        else None
+                    ),
+                    "turns": turns,
+                    "request_id": chat_history.new_request_id(),
+                },
+            )
 
 
 @web_router.post("/ui/chat", response_class=HTMLResponse)
@@ -322,6 +370,32 @@ async def ui_chat(request: Request):
         question = (form.get("question") or "").strip()
         if not question:
             return HTMLResponse("", status_code=204)
+        conversation_id = (form.get("conversationId") or "").strip()
+        request_id = chat_history.normalize_request_id(
+            form.get("requestId")
+        )
+        conversation = None
+        if conversation_id:
+            conversation = await chat_history.get_conversation(
+                session, user.id, conversation_id
+            )
+            if conversation is None:
+                return HTMLResponse(
+                    "会話が見つかりません。",
+                    status_code=404,
+                )
+        existing = await chat_history.find_turn_by_request(
+            session, user.id, request_id
+        )
+        if existing is not None:
+            return HTMLResponse(
+                "",
+                headers={
+                    "HX-Redirect": (
+                        f"/chat?conversation={existing.conversation_id}"
+                    )
+                },
+            )
         series_id = (form.get("seriesId") or "").strip() or None
         sources = [
             v.strip().lower()
@@ -332,19 +406,113 @@ async def ui_chat(request: Request):
             main.AskBody(question=question, seriesId=series_id, sources=sources),
             session=session,
         )
-        return templates.TemplateResponse(
-            request,
-            "_chat_turn.html",
-            {
-                "request": request,
-                "question": question,
-                "answer": result["answer"],
-                "sources": result["sources"],
-                "degraded": result["degraded"],
-                "series_name": result.get("seriesName"),
-                "series_count": result.get("seriesCount") or 0,
-            },
+        next_request_id = chat_history.new_request_id()
+        # A degraded response is useful as an in-page fallback, but it is not a
+        # completed answer and must not become durable history.
+        if not result.get("answer") or result.get("degraded"):
+            with timed("template"):
+                return templates.TemplateResponse(
+                    request,
+                    "_chat_turn.html",
+                    {
+                        "request": request,
+                        "question": question,
+                        "answer": result.get("answer"),
+                        "sources": result.get("sources") or [],
+                        "degraded": bool(result.get("degraded")),
+                        "series_name": result.get("seriesName"),
+                        "series_count": result.get("seriesCount") or 0,
+                        "next_request_id": next_request_id,
+                    },
+                )
+
+        search_conditions = {
+            "mode": "semantic",
+            "seriesId": series_id,
+            "resolvedSeriesId": result.get("seriesId"),
+            "sources": sources or [],
+            "topK": result.get("topK") or 8,
+        }
+        try:
+            saved_conversation, saved_turn = await chat_history.save_turn(
+                session,
+                user_id=user.id,
+                request_id=request_id,
+                conversation=conversation,
+                question=question,
+                answer=result["answer"],
+                sources=result.get("sources") or [],
+                search_conditions=search_conditions,
+                series_name=result.get("seriesName") or "",
+                series_count=result.get("seriesCount") or 0,
+            )
+        except IntegrityError:
+            # Concurrent repeats of the same browser request race only at the
+            # unique constraint. Roll back the losing transaction and reload
+            # the single committed turn rather than persisting a duplicate.
+            await session.rollback()
+            existing = await chat_history.find_turn_by_request(
+                session, user.id, request_id
+            )
+            if existing is None:
+                raise
+            return HTMLResponse(
+                "",
+                headers={
+                    "HX-Redirect": (
+                        f"/chat?conversation={existing.conversation_id}"
+                    )
+                },
+            )
+
+        if not conversation_id:
+            return HTMLResponse(
+                "",
+                headers={
+                    "HX-Redirect": (
+                        f"/chat?conversation={saved_conversation.id}"
+                    )
+                },
+            )
+        with timed("template"):
+            return templates.TemplateResponse(
+                request,
+                "_chat_turn.html",
+                {
+                    "request": request,
+                    "question": question,
+                    "answer": result["answer"],
+                    "sources": result["sources"],
+                    "degraded": result["degraded"],
+                    "series_name": result.get("seriesName"),
+                    "series_count": result.get("seriesCount") or 0,
+                    "created_at": saved_turn.to_dict()["createdAt"],
+                    "next_request_id": next_request_id,
+                },
+            )
+
+
+@web_router.post("/ui/chat/conversations/{conversation_id}/delete")
+async def delete_chat_conversation(request: Request, conversation_id: str):
+    async with SessionLocal() as session:
+        user = await _current_user_optional(request, session)
+        if user is None:
+            return _login_redirect(request)
+        deleted = await chat_history.delete_conversation(
+            session, user.id, conversation_id
         )
+        if not deleted:
+            return templates.TemplateResponse(
+                request,
+                "not_found.html",
+                {
+                    "request": request,
+                    "user": _user_dict(user),
+                    "active_nav": "/chat",
+                },
+                status_code=404,
+            )
+    return RedirectResponse("/chat", status_code=303)
 
 
 @web_router.get("/slides/{slide_id}", response_class=HTMLResponse)
@@ -356,24 +524,31 @@ async def slide_detail(request: Request, slide_id: str):
         if user is None:
             return _login_redirect(request)
         try:
-            slide = await main.get_slide(slide_id, session=session)
+            with timed("db_slide"):
+                slide_row = await session.get(Slide, slide_id)
+            if slide_row is None:
+                raise HTTPException(status_code=404, detail="slide not found")
+            slide = slide_row.to_dict()
         except HTTPException:
             return templates.TemplateResponse(request, 
                 "not_found.html",
                 {"request": request, "user": _user_dict(user), "active_nav": ""},
                 status_code=404,
             )
-        similar = await main.get_similar(slide_id, session=session)
-        return templates.TemplateResponse(request, 
-            "slide_detail.html",
-            {
-                "request": request,
-                "user": _user_dict(user),
-                "active_nav": "",
-                "slide": slide,
-                "similar": similar,
-            },
+        similar = await main._get_similar_for_row(
+            slide_row, session, compact=True
         )
+        with timed("template"):
+            return templates.TemplateResponse(request,
+                "slide_detail.html",
+                {
+                    "request": request,
+                    "user": _user_dict(user),
+                    "active_nav": "",
+                    "slide": slide,
+                    "similar": similar,
+                },
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -388,9 +563,10 @@ async def login_page(request: Request):
         user = await _current_user_optional(request, session)
         if user is not None:
             return RedirectResponse(nxt, status_code=303)
-    return templates.TemplateResponse(request, 
-        "login.html", {"request": request, "next": nxt, "mode": "login"}
-    )
+    with timed("template"):
+        return templates.TemplateResponse(request,
+            "login.html", {"request": request, "next": nxt, "mode": "login"}
+        )
 
 
 @web_router.post("/login", response_class=HTMLResponse)

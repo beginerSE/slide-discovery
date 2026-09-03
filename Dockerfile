@@ -1,4 +1,4 @@
-# Container image for the 提案スライド検索 API server (Cloud Run).
+# Container image for the 社内スライド検索 API server (Cloud Run).
 #
 # Runs the FastAPI app under uvicorn. In GCP mode the app authenticates to
 # Cloud SQL, Vertex AI, and the Drive API via ADC (the attached Cloud Run

@@ -80,7 +80,9 @@ async def _embed_once(text: str, task_type: str) -> list[float]:
     url = f"{_API_BASE}/models/{EMBED_MODEL}:embedContent"
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
-            url, params={"key": _api_key()}, json=payload
+            url,
+            headers={"x-goog-api-key": _api_key()},
+            json=payload,
         )
         if resp.status_code >= 400:
             raise RuntimeError(

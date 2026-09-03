@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timezone
 from typing import AsyncGenerator
+from uuid import uuid4
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
@@ -11,9 +12,12 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    ForeignKey,
+    Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -244,6 +248,111 @@ class User(Base):
             "displayName": self.display_name,
             "role": self.role,
             "canUpload": self.can_upload,
+            "createdAt": self.created_at.astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+        }
+
+
+class ChatConversation(Base):
+    """A durable, user-owned conversational-search thread."""
+
+    __tablename__ = "chat_conversations"
+    __table_args__ = (
+        Index(
+            "chat_conversations_user_updated_idx",
+            "user_id",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow
+    )
+
+    def to_dict(self, *, turn_count: int = 0, active: bool = False) -> dict:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "createdAt": self.created_at.astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "updatedAt": self.updated_at.astimezone(timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "turnCount": int(turn_count),
+            "isActive": active,
+        }
+
+
+class ChatTurn(Base):
+    """One successfully completed question/answer inside a chat thread."""
+
+    __tablename__ = "chat_turns"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "request_id",
+            name="chat_turns_user_request_uq",
+        ),
+        Index(
+            "chat_turns_conversation_created_idx",
+            "conversation_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=True
+    )
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    request_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    sources: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    search_conditions: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    series_name: Mapped[str] = mapped_column(
+        String(255), nullable=False, default=""
+    )
+    series_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    degraded: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "conversationId": self.conversation_id,
+            "question": self.question,
+            "answer": self.answer,
+            "sources": list(self.sources or []),
+            "searchConditions": dict(self.search_conditions or {}),
+            "seriesName": self.series_name,
+            "seriesCount": self.series_count,
+            "degraded": self.degraded,
             "createdAt": self.created_at.astimezone(timezone.utc)
             .isoformat()
             .replace("+00:00", "Z"),

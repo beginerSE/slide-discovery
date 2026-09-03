@@ -1,0 +1,16 @@
+# Keep the build context small and reproducible.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Runtime-generated thumbnails (regenerated on demand; ephemeral on Cloud Run).
+data/
+
+# Replit / local tooling that the container never needs.
+.replit-artifact/
+deploy/
+*.md
+.env
+.env.*
