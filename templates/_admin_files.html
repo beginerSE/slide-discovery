@@ -29,10 +29,12 @@
       <div class="file-row">
         {{ m.icon("file-text", "ficon") }}
         <div class="flex-1">
-          <div class="row wrap gap-2">
+          <div class="file-title-row">
             <span class="file-name" title="{{ f.fileName or f.driveFileId }}">{{ f.fileName or f.driveFileId }}</span>
-            <span class="badge {{ st[1] }}">{{ m.icon("loader", "spin") if f.status == "processing" else m.icon(st[2]) }}{{ st[0] }}</span>
-            {% if f.slideCount and f.slideCount > 0 %}<span class="badge badge-outline">{{ f.slideCount }} スライド</span>{% endif %}
+            <div class="file-statuses">
+              {% if f.slideCount and f.slideCount > 0 %}<span class="badge badge-outline">{{ f.slideCount }} スライド</span>{% endif %}
+              <span class="badge {{ st[1] }}">{{ m.icon("loader", "spin") if f.status == "processing" else m.icon(st[2]) }}{{ st[0] }}</span>
+            </div>
           </div>
           <div class="file-meta">
             <a href="{{ f.shareUrl }}" target="_blank" rel="noopener noreferrer" class="row gap-2">{{ m.icon("external-link") }}Drive で開く</a>
@@ -45,9 +47,12 @@
           </div>
           {% if f.lastError %}<p class="text-xs text-destructive mt-1 truncate">⚠ {{ f.lastError }}</p>{% endif %}
         </div>
-        <div class="row gap-2 shrink-0">
-          <button class="btn btn-ghost btn-icon" title="再取り込み"
-            hx-post="/ui/admin/files/{{ f.id }}/retry" hx-target="#admin-files" hx-swap="innerHTML" hx-include="#admin-files-q">{{ m.icon("rotate-cw") }}</button>
+        <div class="file-actions">
+          <button class="btn btn-outline btn-sm" title="完了済みページを再利用して、未完了部分だけ処理します"
+            hx-post="/ui/admin/files/{{ f.id }}/retry?force=false" hx-target="#admin-files" hx-swap="innerHTML" hx-include="#admin-files-q">{{ m.icon("play") }}続きから再開</button>
+          <button class="btn btn-ghost btn-sm text-destructive" title="保存済みの解析結果を使わず、全ページを最初から解析します"
+            hx-post="/ui/admin/files/{{ f.id }}/retry?force=true" hx-target="#admin-files" hx-swap="innerHTML" hx-include="#admin-files-q"
+            hx-confirm="{{ f.fileName or f.driveFileId }} の全ページを最初から再解析しますか？">{{ m.icon("rotate-cw") }}最初から再解析</button>
           <button class="btn btn-ghost btn-icon" title="サムネイル再生成（AI再解析なし）"
             hx-post="/ui/admin/files/{{ f.id }}/regen-thumbnails" hx-target="#admin-files" hx-swap="innerHTML" hx-include="#admin-files-q">{{ m.icon("image") }}</button>
           <button class="btn btn-ghost btn-icon" title="削除"

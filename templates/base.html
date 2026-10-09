@@ -20,6 +20,7 @@
         <a href="/" aria-label="スライド検索" title="スライド検索" class="nav-item {% if active_nav == '/' %}active{% endif %}">{{ m.icon("search") }}<span>スライド検索</span></a>
         <a href="/chat" aria-label="対話検索" title="対話検索" class="nav-item {% if active_nav == '/chat' %}active{% endif %}">{{ m.icon("message-circle") }}<span>対話検索</span></a>
         <a href="/guide" aria-label="使い方ガイド" title="使い方ガイド" class="nav-item {% if active_nav == '/guide' %}active{% endif %}">{{ m.icon("file-text") }}<span>使い方ガイド</span></a>
+        <a href="https://drive.google.com/drive/folders/1t6u13KTOrU8kFgVF_B7YBNPpeKkBuUac" target="_blank" rel="noopener noreferrer" aria-label="資料元フォルダ" title="資料元フォルダを Google Drive で開く" class="nav-item">{{ m.icon("folder") }}<span>資料元フォルダ</span></a>
         {% if user and (user.role == 'admin' or user.canUpload) %}
         <a href="/contribute" aria-label="リンク追加" title="リンク追加" class="nav-item {% if active_nav == '/contribute' %}active{% endif %}">{{ m.icon("link") }}<span>リンク追加</span></a>
         {% endif %}

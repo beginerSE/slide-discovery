@@ -188,6 +188,8 @@ document.addEventListener("submit", (e) => {
 // partial page enhancement, while preserving keyboard focus on the toggle.
 (function initSearchOptions() {
   let pendingFocus = null;
+  let latestRequest = null;
+  let disclosureOpen = null;
 
   function setFacetState(button) {
     const state = document.getElementById("facet-state");
@@ -281,13 +283,46 @@ document.addEventListener("submit", (e) => {
       && event.detail.requestConfig
       && event.detail.requestConfig.elt
     ) || event.target;
-    if (!requestElement.closest || !requestElement.closest("#search-panel")) return;
+    if (!requestElement.closest || !requestElement.closest("#search-workspace")) return;
+    latestRequest = event.detail.xhr;
+    const feedback = document.getElementById("search-feedback");
+    const error = document.getElementById("search-error");
+    const results = document.getElementById("results-panel");
+    if (feedback) {
+      feedback.textContent = "スライドを探しています…";
+      feedback.hidden = false;
+    }
+    if (error) error.hidden = true;
+    if (results) results.setAttribute("aria-busy", "true");
     if (!requestElement.matches("[data-facet-field], [data-search-clear]")) {
       pendingFocus = null;
     }
   });
 
+  document.body && document.body.addEventListener("htmx:afterRequest", (event) => {
+    // A replaced/aborted request must never clear a newer request's feedback.
+    if (!latestRequest || event.detail.xhr !== latestRequest) return;
+    latestRequest = null;
+    const feedback = document.getElementById("search-feedback");
+    const error = document.getElementById("search-error");
+    const results = document.getElementById("results-panel");
+    if (feedback) feedback.hidden = true;
+    if (results) results.removeAttribute("aria-busy");
+    if (error) error.hidden = !event.detail.failed;
+  });
+
+  document.body && document.body.addEventListener("htmx:beforeSwap", (event) => {
+    if (!event.target || event.target.id !== "facet-content") return;
+    const disclosure = event.target.querySelector("[data-search-disclosure]");
+    disclosureOpen = disclosure ? disclosure.open : null;
+  });
+
   document.body && document.body.addEventListener("htmx:afterSwap", (event) => {
+    if (event.target && event.target.id === "facet-content") {
+      const disclosure = event.target.querySelector("[data-search-disclosure]");
+      if (disclosure && disclosureOpen !== null) disclosure.open = disclosureOpen;
+      disclosureOpen = null;
+    }
     if (!pendingFocus || !event.target || event.target.id !== "facet-content") return;
     if (pendingFocus.query) {
       const query = document.querySelector('input[name="q"]');
@@ -299,7 +334,8 @@ document.addEventListener("submit", (e) => {
         button.dataset.facetField === pendingFocus.field
         && button.dataset.facetValue === pendingFocus.value
       ));
-      if (replacement) replacement.focus();
+      const panel = document.getElementById("search-options-panel");
+      if (replacement && panel && !panel.hidden) replacement.focus();
       else {
         const toggle = document.getElementById("search-options-toggle");
         if (toggle) toggle.focus();

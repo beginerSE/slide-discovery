@@ -913,10 +913,50 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 .failed-file-error { margin: 0; font-size: 0.72rem; }
 .file-row .ficon { width: 1.25rem; height: 1.25rem; color: hsl(var(--muted-foreground)); flex-shrink: 0; margin-top: 0.15rem; }
 .file-name { font-weight: 500; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-title-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+.file-statuses {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  min-width: 10.5rem;
+}
 .file-meta { font-size: 0.72rem; color: hsl(var(--muted-foreground)); margin-top: 0.25rem; display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
 .file-meta a:hover { color: hsl(var(--primary)); }
 .file-folder-link { max-width: 100%; }
 .file-folder-link svg { flex: none; }
+.file-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  max-width: 25rem;
+}
+.file-actions .btn { white-space: nowrap; }
+@media (max-width: 900px) {
+  .file-row { flex-wrap: wrap; }
+  .file-title-row {
+    grid-template-columns: 1fr;
+    gap: 0.35rem;
+  }
+  .file-statuses {
+    justify-content: flex-start;
+    min-width: 0;
+  }
+  .file-actions {
+    width: 100%;
+    max-width: none;
+    padding-left: 2rem;
+    justify-content: flex-start;
+  }
+}
 
 /* Parent-folder paths: secondary, compact navigation alongside the source file. */
 .chat-source-folder {
@@ -1086,6 +1126,95 @@ a.doccat-proposal:hover { background: hsl(145 55% 87%); }
 .search-aux-grid .mode-toggle, .search-aux-grid .source-toggle { width: 100%; }
 .search-aux-grid .mode-option, .search-aux-grid .source-option { flex: 1; justify-content: center; }
 .search-options-panel .hint-row { padding: .7rem 0 .2rem; border-top: 1px solid hsl(var(--border)); }
+/* Search-only refinement: a quiet reading surface, not an admin control panel.
+   Keep the rest of the application on its existing theme. */
+#search-workspace {
+  --background: 205 24% 97%;
+  --card: 45 30% 99%;
+  --foreground: 212 26% 22%;
+  --primary: 207 35% 34%;
+  --primary-foreground: 45 30% 99%;
+  --muted: 205 22% 94%;
+  --muted-foreground: 210 15% 42%;
+  --border: 205 19% 85%;
+  --accent: 205 26% 91%;
+  --ring: 207 35% 34%;
+  font-family: "Noto Sans JP", system-ui, sans-serif;
+}
+#search-workspace [hidden] { display: none !important; }
+#search-workspace .search-panel {
+  position: relative; top: auto; z-index: auto;
+  padding: 1.6rem 1.75rem 1rem; gap: 1.15rem; box-shadow: none;
+}
+.search-intro h1 { font-size: 1.45rem; font-weight: 700; letter-spacing: .01em; }
+.search-intro p { margin-top: .4rem; color: hsl(var(--muted-foreground)); font-size: .85rem; }
+#search-workspace .search-box .input { height: 3.25rem; background: hsl(var(--background)); }
+#search-workspace .search-btn { height: 3.25rem; }
+#search-workspace .search-options-toggle { flex-wrap: wrap; gap: .5rem .85rem; }
+#search-workspace .search-options-summary { white-space: normal; flex-wrap: wrap; overflow: visible; }
+#search-workspace .summary-separator { color: hsl(var(--muted-foreground) / .6); }
+#search-workspace .search-options-panel { max-height: none; overflow: visible; }
+#search-workspace .search-aux-grid { gap: 1.5rem; }
+.search-option-help { font-size: .75rem; color: hsl(var(--muted-foreground)); margin-top: .5rem; line-height: 1.7; }
+.search-tips { margin: .2rem 0 1.25rem; font-size: .8rem; color: hsl(var(--muted-foreground)); }
+.search-tips summary, .search-more-filters summary { cursor: pointer; padding: .5rem 0; }
+#search-workspace .hint-row { border-top: 0; font-size: .78rem; gap: .5rem 1rem; }
+#search-workspace .hint-row code { font-size: .76rem; }
+#search-workspace .facet-heading { margin-bottom: 1rem; padding-bottom: .75rem; gap: .5rem; flex-wrap: wrap; }
+#search-workspace .facet-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.15rem 1.75rem; }
+#search-workspace .facet-group-label { font-size: .8rem; letter-spacing: 0; color: hsl(var(--foreground)); }
+#search-workspace .chip { min-height: 2.2rem; font-size: .78rem; padding: .35rem .65rem; }
+#search-workspace .chip .count { font-size: .7rem; }
+#search-workspace .chips:not(.chips-scroll) { max-height: 10.5rem; overflow-y: auto; }
+#search-workspace .chips-scroll { padding: .5rem; max-height: 10.5rem; }
+.search-more-filters { margin-top: 1.2rem; border-top: 1px solid hsl(var(--border)); font-size: .8rem; }
+.search-more-filters .facet-grid { padding-top: .75rem; }
+#search-selection:not(:has(.search-selected)) { display: none; }
+.search-selected { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; border-top: 1px solid hsl(var(--border)); padding-top: .85rem; }
+.search-selected-label { color: hsl(var(--muted-foreground)); font-size: .75rem; margin-right: .25rem; }
+#search-workspace .search-selected .chip.active { background: hsl(var(--accent)); color: hsl(var(--primary)); border-color: hsl(var(--primary) / .3); }
+.search-feedback, .search-error { padding: 1rem 1.25rem; border-radius: .6rem; font-size: .85rem; }
+.search-feedback { background: hsl(var(--muted)); color: hsl(var(--primary)); }
+.search-feedback::after { content: ""; display: block; width: min(65%, 26rem); height: .5rem; margin-top: .7rem; border-radius: .25rem; background: hsl(var(--border)); }
+.search-error { background: hsl(35 60% 94%); border: 1px solid hsl(35 35% 77%); }
+.search-error button { margin-top: .7rem; }
+.search-results-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: .5rem 1rem; margin-bottom: 1rem; }
+#search-workspace .section-title { font-size: 1.05rem; }
+#search-workspace .result-count { font-size: .95rem; margin-bottom: .9rem; overflow-wrap: anywhere; }
+#search-workspace .slide-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; }
+#search-workspace .slide-card { border-radius: .6rem; cursor: default; transition: transform .18s; }
+#search-workspace .slide-card:hover { box-shadow: none; transform: translateY(-2px); }
+#search-workspace .slide-card-body { padding: 1rem; gap: .65rem; }
+#search-workspace .slide-card-title { font-size: .94rem; line-height: 1.65; }
+#search-workspace .slide-file { font-size: .76rem; }
+#search-workspace .card-folder-open, #search-workspace .card-source-open { font-size: .76rem; min-height: 1.8rem; }
+.search-card-details { position: relative; z-index: 2; font-size: .74rem; color: hsl(var(--muted-foreground)); }
+.search-card-details summary { cursor: pointer; padding: .4rem 0; }
+.search-card-details > .row, .search-card-details > .match-reason { margin-top: .4rem; }
+#search-workspace .match-reason { font-size: .78rem; padding: .65rem; }
+#search-workspace .match-reason-head { flex-wrap: wrap; }
+#search-workspace .empty-state { background: hsl(var(--card)); border: 1px solid hsl(var(--border)); padding: 2.5rem 1rem; border-radius: .75rem; }
+#search-workspace button:focus-visible, #search-workspace a:focus-visible, #search-workspace summary:focus-visible {
+  outline: 2px solid hsl(var(--ring)); outline-offset: 3px;
+}
+#search-workspace .slide-card:has(.slide-card-link:focus-visible) { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }
+@media (max-width: 1100px) {
+  #search-workspace .slide-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 767px) {
+  #search-workspace .search-panel { padding: 1.15rem 1rem .85rem; }
+  .search-intro h1 { font-size: 1.2rem; }
+  #search-workspace .search-aux-grid, #search-workspace .facet-grid, #search-workspace .slide-grid { grid-template-columns: minmax(0, 1fr); }
+  #search-workspace .search-options-summary { max-width: none; width: 100%; order: 3; font-size: .72rem; }
+  #search-workspace .search-box .input { font-size: .85rem; }
+  #search-workspace .search-btn { padding: 0 .8rem; }
+  #search-workspace .search-btn svg { display: none; }
+  #search-workspace .slide-card-body { padding: 1rem 1.15rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #search-workspace *, #search-workspace *::after { transition: none !important; }
+  #search-workspace .slide-card:hover { transform: none; }
+}
 @media (max-width: 639px) {
   .search-options-summary { max-width: 55%; }
   .search-aux-grid { grid-template-columns: 1fr; gap: .75rem; }

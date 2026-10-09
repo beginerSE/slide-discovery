@@ -1,0 +1,15 @@
+{% set labels = {"industry": "業界", "client": "顧客", "proposalType": "スライド種別", "graphType": "グラフ", "docCategory": "資料種別", "tag": "タグ"} %}
+{% if facets.values() | select | list | length %}
+<div class="search-selected" aria-label="選択中の絞り込み">
+  <span class="search-selected-label">選択中</span>
+  {% for field, value in facets.items() if value %}
+  <button type="button" class="chip active"
+    data-facet-field="{{ field }}" data-facet-value="{{ value }}" aria-pressed="true"
+    aria-label="{{ labels.get(field, field) }}：{{ value }} の絞り込みを解除"
+    hx-get="/ui/search" hx-target="#facet-content" hx-swap="innerHTML"
+    hx-include="[name='q'], #facet-state, [name='mode'], [name='source']">
+    <span>{{ labels.get(field, field) }}：{{ value }}</span><span aria-hidden="true">×</span>
+  </button>
+  {% endfor %}
+</div>
+{% endif %}
