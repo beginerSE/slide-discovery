@@ -6,11 +6,11 @@ selected by :func:`config.use_gcs_thumbnails` (keyed off ``THUMBNAIL_BUCKET``):
 
 * **local disk** (dev, default) — files under ``THUMB_ROOT`` (``data/thumbnails``).
   This is the historical behaviour; nothing changes locally.
-* **Cloud Storage** (production) — objects at
-  ``{prefix}/{safe_file_id}/{page_no}.png`` in the configured bucket, accessed
-  via ADC (no key file). Cloud Run's local disk is ephemeral and per-instance,
-  so persisting thumbnails in GCS lets them survive restarts and be shared
-  across instances.
+* **Cloud Storage** (production) — pages are uploaded under
+  ``{prefix}/__versions__/{safe_file_id}/{generation}/{page_no}.png`` and a
+  small ``{prefix}/{safe_file_id}/_active.json`` manifest atomically selects
+  the complete generation readers may see. Legacy direct-page objects remain
+  readable until the first successful manifest-based publish.
 
 The ingest pipeline always renders to a local *staging* dir first (Gemini needs
 the file on disk); :func:`publish_file` then atomically swaps those PNGs in as
@@ -20,9 +20,14 @@ durably in place — so a failed render/publish never wipes existing thumbnails.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import shutil
+import threading
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import config
@@ -41,6 +46,11 @@ _GCS_SCOPES = ["https://www.googleapis.com/auth/devstorage.read_write"]
 # keeps retrying in the background.
 _GCS_OP_TIMEOUT = 30.0       # seconds, per underlying GCS request
 _GCS_BATCH_TIMEOUT = 180.0   # seconds, whole upload/clear batch
+CHECKPOINT_RETENTION_DAYS = 7
+_ACTIVE_VERSION_LOCK = threading.RLock()
+_ACTIVE_VERSIONS: set[tuple[str, str]] = set()
+_PUBLISH_LOCKS_LOCK = threading.Lock()
+_PUBLISH_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 def safe_name(file_id: str) -> str:
@@ -49,6 +59,52 @@ def safe_name(file_id: str) -> str:
 
 def _blob_name(safe: str, page_no: int) -> str:
     return f"{config.thumbnail_prefix()}/{safe}/{page_no}.png"
+
+
+def _active_blob_name(safe: str) -> str:
+    return f"{config.thumbnail_prefix()}/{safe}/_active.json"
+
+
+def _published_version_prefix(safe: str, generation: str) -> str:
+    return f"{config.thumbnail_prefix()}/__versions__/{safe}/{generation}/"
+
+
+def _publish_lock(safe: str) -> asyncio.Lock:
+    with _PUBLISH_LOCKS_LOCK:
+        return _PUBLISH_LOCKS.setdefault(safe, asyncio.Lock())
+
+
+def version_key(fingerprint: str) -> str:
+    """Opaque, path-safe key for one exact source-file version."""
+    return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:24]
+
+
+def protect_version(file_id: str, fingerprint: str) -> None:
+    """Mark an exact private checkpoint version as unsafe to prune."""
+    with _ACTIVE_VERSION_LOCK:
+        _ACTIVE_VERSIONS.add((safe_name(file_id), version_key(fingerprint)))
+
+
+def unprotect_version(file_id: str, fingerprint: str) -> None:
+    with _ACTIVE_VERSION_LOCK:
+        _ACTIVE_VERSIONS.discard((safe_name(file_id), version_key(fingerprint)))
+
+
+def _protected(version: tuple[str, str]) -> bool:
+    return version in _ACTIVE_VERSIONS
+
+
+def render_dir(file_id: str, fingerprint: str) -> Path:
+    """Local work directory isolated by file and content version."""
+    return THUMB_ROOT / f"{safe_name(file_id)}.staging-{version_key(fingerprint)}"
+
+
+def _checkpoint_prefix(safe: str, fingerprint: str) -> str:
+    # Deliberately outside the public/live ``{prefix}/{safe}/{page}.png`` shape.
+    return (
+        f"{config.thumbnail_prefix()}/__staging__/{safe}/"
+        f"{version_key(fingerprint)}/"
+    )
 
 
 # --- GCS client (lazy, cached) ---------------------------------------------
@@ -72,46 +128,341 @@ def _gcs_bucket():
 
 # --- Sync workers (run via asyncio.to_thread) ------------------------------
 
-def _gcs_publish(safe: str, staging_dir: Path) -> None:
-    """Two-phase publish to GCS: upload the freshly-rendered PNGs first, then
-    prune any stale blobs (pages no longer present, e.g. a now-shorter deck).
-
-    The old blobs are deleted ONLY after every new upload succeeds, so an upload
-    failure (raised here, caught by :func:`publish_file`) leaves the previous
-    thumbnails fully intact in the bucket.
-    """
+def _gcs_upload_version(safe: str, staging_dir: Path, generation: str) -> list[int]:
+    """Upload a complete, private generation without changing what readers see."""
     bucket = _gcs_bucket()
-    new_pages: set[str] = set()
+    pages: list[int] = []
+    prefix = _published_version_prefix(safe, generation)
     for png in sorted(staging_dir.glob("*.png")):
-        page_no = png.stem
-        new_pages.add(page_no)
-        blob = bucket.blob(f"{config.thumbnail_prefix()}/{safe}/{page_no}.png")
+        if not png.stem.isdigit():
+            continue
+        page_no = int(png.stem)
+        pages.append(page_no)
+        blob = bucket.blob(f"{prefix}{page_no}.png")
         blob.cache_control = "public, max-age=300"
         blob.upload_from_filename(
             str(png), content_type="image/png", timeout=_GCS_OP_TIMEOUT
         )
-    # Uploads succeeded — safe to drop blobs for pages that no longer exist.
-    prefix = f"{config.thumbnail_prefix()}/{safe}/"
-    for blob in bucket.list_blobs(prefix=prefix, timeout=_GCS_OP_TIMEOUT):
-        if Path(blob.name).stem not in new_pages:
-            blob.delete(timeout=_GCS_OP_TIMEOUT)
+    if not pages:
+        raise RuntimeError("no valid thumbnail pages uploaded")
+    return pages
+
+
+def _gcs_manifest_state(safe: str) -> tuple[bool, str | None, int | str]:
+    """Read one exact manifest generation for compare-and-swap updates."""
+    blob = _gcs_bucket().blob(_active_blob_name(safe))
+    if not blob.exists(timeout=_GCS_OP_TIMEOUT):
+        return False, None, 0
+    blob.reload(timeout=_GCS_OP_TIMEOUT)
+    object_generation = blob.generation
+    manifest = json.loads(
+        blob.download_as_bytes(
+            timeout=_GCS_OP_TIMEOUT,
+            if_generation_match=object_generation,
+        )
+    )
+    generation = manifest.get("generation")
+    active = generation if isinstance(generation, str) and generation else None
+    return True, active, object_generation
+
+
+def _gcs_publish_snapshot(safe: str) -> tuple[int | str, list[str]]:
+    """Capture the manifest CAS token and only objects that predate this publish."""
+    _, _, manifest_generation = _gcs_manifest_state(safe)
+    bucket = _gcs_bucket()
+    candidates: list[str] = []
+    versions_prefix = f"{config.thumbnail_prefix()}/__versions__/{safe}/"
+    candidates.extend(
+        blob.name
+        for blob in bucket.list_blobs(
+            prefix=versions_prefix, timeout=_GCS_OP_TIMEOUT
+        )
+    )
+    legacy_prefix = f"{config.thumbnail_prefix()}/{safe}/"
+    candidates.extend(
+        blob.name
+        for blob in bucket.list_blobs(prefix=legacy_prefix, timeout=_GCS_OP_TIMEOUT)
+        if blob.name != _active_blob_name(safe)
+    )
+    return manifest_generation, candidates
+
+
+def _gcs_read_manifest(safe: str) -> tuple[bool, str | None]:
+    """Read the current manifest atomically for the hot thumbnail read path."""
+    blob = _gcs_bucket().blob(_active_blob_name(safe))
+    if not blob.exists(timeout=_GCS_OP_TIMEOUT):
+        return False, None
+    manifest = json.loads(blob.download_as_bytes(timeout=_GCS_OP_TIMEOUT))
+    generation = manifest.get("generation")
+    active = generation if isinstance(generation, str) and generation else None
+    return True, active
+
+
+def _gcs_activate_version(
+    safe: str,
+    generation: str,
+    pages: list[int],
+    expected_manifest_generation: int | str,
+) -> None:
+    """Atomically switch readers if nobody changed the manifest meanwhile."""
+    blob = _gcs_bucket().blob(_active_blob_name(safe))
+    blob.cache_control = "no-store"
+    blob.upload_from_string(
+        json.dumps({"generation": generation, "pages": pages}),
+        content_type="application/json",
+        timeout=_GCS_OP_TIMEOUT,
+        if_generation_match=expected_manifest_generation,
+    )
+
+
+def _gcs_prune_published_versions(candidate_names: list[str]) -> None:
+    """Remove only objects observed before this publisher took its CAS snapshot."""
+    bucket = _gcs_bucket()
+    for name in candidate_names:
+        bucket.blob(name).delete(timeout=_GCS_OP_TIMEOUT)
 
 
 def _gcs_get(safe: str, page_no: int) -> bytes | None:
-    blob = _gcs_bucket().blob(_blob_name(safe, page_no))
+    manifest_exists, generation = _gcs_read_manifest(safe)
+    if manifest_exists and generation is None:
+        return None  # deletion tombstone: never fall back to legacy objects
+    name = _blob_name(safe, page_no)
+    if generation:
+        name = f"{_published_version_prefix(safe, generation)}{page_no}.png"
+    blob = _gcs_bucket().blob(name)
     if not blob.exists(timeout=_GCS_OP_TIMEOUT):
         return None
     return blob.download_as_bytes(timeout=_GCS_OP_TIMEOUT)
 
 
 def _gcs_delete_prefix(safe: str) -> None:
+    """Publish a deletion tombstone, then remove all now-unreachable images."""
     bucket = _gcs_bucket()
-    prefix = f"{config.thumbnail_prefix()}/{safe}/"
-    for blob in bucket.list_blobs(prefix=prefix, timeout=_GCS_OP_TIMEOUT):
+    _, _, manifest_generation = _gcs_manifest_state(safe)
+    legacy_prefix = f"{config.thumbnail_prefix()}/{safe}/"
+    candidates = [
+        blob.name
+        for blob in bucket.list_blobs(
+            prefix=legacy_prefix, timeout=_GCS_OP_TIMEOUT
+        )
+        if blob.name != _active_blob_name(safe)
+    ]
+    versions_prefix = f"{config.thumbnail_prefix()}/__versions__/{safe}/"
+    candidates.extend(
+        blob.name
+        for blob in bucket.list_blobs(
+            prefix=versions_prefix, timeout=_GCS_OP_TIMEOUT
+        )
+    )
+    manifest = bucket.blob(_active_blob_name(safe))
+    manifest.cache_control = "no-store"
+    manifest.upload_from_string(
+        json.dumps({"deleted": True}),
+        content_type="application/json",
+        timeout=_GCS_OP_TIMEOUT,
+        if_generation_match=manifest_generation,
+    )
+    for name in candidates:
+        bucket.blob(name).delete(timeout=_GCS_OP_TIMEOUT)
+
+
+def _gcs_restore_checkpoint(
+    safe: str, fingerprint: str, out_dir: Path, total_pages: int | None
+) -> set[int]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    restored: set[int] = set()
+    prefix = _checkpoint_prefix(safe, fingerprint)
+    for blob in _gcs_bucket().list_blobs(prefix=prefix, timeout=_GCS_OP_TIMEOUT):
+        stem = Path(blob.name).stem
+        if not stem.isdigit():
+            continue
+        page_no = int(stem)
+        if page_no < 1 or (total_pages is not None and page_no > total_pages):
+            continue
+        blob.download_to_filename(
+            str(out_dir / f"{page_no}.png"), timeout=_GCS_OP_TIMEOUT
+        )
+        restored.add(page_no)
+    return restored
+
+
+def checkpoint_page(
+    file_id: str, fingerprint: str, page_no: int, png_path: Path
+) -> bool:
+    """Persist one completed render without exposing it as a live thumbnail."""
+    if not config.use_gcs_thumbnails():
+        return True  # already durable enough for a same-process/local retry
+    try:
+        safe = safe_name(file_id)
+        blob = _gcs_bucket().blob(
+            f"{_checkpoint_prefix(safe, fingerprint)}{page_no}.png"
+        )
+        blob.upload_from_filename(
+            str(png_path), content_type="image/png", timeout=_GCS_OP_TIMEOUT
+        )
+        return True
+    except Exception:
+        # Checkpointing is an optimization. A transient storage failure must not
+        # discard an otherwise successful ingest or affect published images.
+        log.exception("failed checkpointing thumbnail %s p%d", file_id, page_no)
+        return False
+
+
+def _gcs_delete_checkpoints(safe: str, fingerprint: str | None = None) -> None:
+    """Delete one version's private work, or every version when unspecified."""
+    if fingerprint is not None:
+        prefix = _checkpoint_prefix(safe, fingerprint)
+    else:
+        prefix = f"{config.thumbnail_prefix()}/__staging__/{safe}/"
+    for blob in _gcs_bucket().list_blobs(prefix=prefix, timeout=_GCS_OP_TIMEOUT):
         blob.delete(timeout=_GCS_OP_TIMEOUT)
 
 
+def _gcs_prune_stale_checkpoints(cutoff: datetime) -> int:
+    """Delete complete private versions whose newest object predates cutoff."""
+    prefix = f"{config.thumbnail_prefix()}/__staging__/"
+    versions: dict[tuple[str, str], list] = {}
+    for blob in _gcs_bucket().list_blobs(prefix=prefix, timeout=_GCS_OP_TIMEOUT):
+        relative = blob.name[len(prefix):]
+        parts = relative.split("/")
+        if len(parts) != 3 or not parts[0] or not parts[1]:
+            continue
+        versions.setdefault((parts[0], parts[1]), []).append(blob)
+
+    deleted = 0
+    for version, blobs in versions.items():
+        updated = [blob.updated for blob in blobs if blob.updated is not None]
+        if not updated or max(updated) >= cutoff:
+            continue
+        # Re-check under the same lock used by protect_version. A render that
+        # started after list_blobs cannot be deleted from beneath itself.
+        with _ACTIVE_VERSION_LOCK:
+            if _protected(version):
+                continue
+            for blob in blobs:
+                blob.delete(timeout=_GCS_OP_TIMEOUT)
+                deleted += 1
+    return deleted
+
+
+def _local_prune_stale_checkpoints(cutoff: datetime) -> int:
+    """Delete stale versioned staging dirs, never live/publish/backup dirs."""
+    deleted = 0
+    if not THUMB_ROOT.exists():
+        return deleted
+    cutoff_ts = cutoff.timestamp()
+    for directory in THUMB_ROOT.glob("*.staging-*"):
+        if not directory.is_dir():
+            continue
+        safe, separator, version = directory.name.rpartition(".staging-")
+        if not separator or not safe or not version:
+            continue
+        try:
+            newest = max(
+                (path.stat().st_mtime for path in directory.rglob("*")),
+                default=directory.stat().st_mtime,
+            )
+        except OSError:
+            continue
+        if newest >= cutoff_ts:
+            continue
+        with _ACTIVE_VERSION_LOCK:
+            if _protected((safe, version)):
+                continue
+            shutil.rmtree(directory, ignore_errors=True)
+            if not directory.exists():
+                deleted += 1
+    return deleted
+
+
 # --- Public async API -------------------------------------------------------
+
+async def prepare_render(
+    file_id: str, fingerprint: str, total_pages: int | None
+) -> tuple[Path, set[int]]:
+    """Restore completed pages for this exact source version into local work."""
+    out_dir = render_dir(file_id, fingerprint)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    restored: set[int] = set()
+    for png in out_dir.glob("*.png"):
+        valid = png.stem.isdigit() and int(png.stem) >= 1
+        if valid and total_pages is not None:
+            valid = int(png.stem) <= total_pages
+        if valid:
+            restored.add(int(png.stem))
+        else:
+            png.unlink(missing_ok=True)
+    if config.use_gcs_thumbnails():
+        try:
+            restored |= await asyncio.wait_for(
+                asyncio.to_thread(
+                    _gcs_restore_checkpoint,
+                    safe_name(file_id),
+                    fingerprint,
+                    out_dir,
+                    total_pages,
+                ),
+                _GCS_BATCH_TIMEOUT,
+            )
+        except Exception:
+            log.exception("failed restoring thumbnail checkpoints for %s", file_id)
+    return out_dir, restored
+
+
+async def clear_render_checkpoints(file_id: str, fingerprint: str) -> None:
+    """Drop private render work only after the whole file operation completes."""
+    safe = safe_name(file_id)
+    shutil.rmtree(render_dir(file_id, fingerprint), ignore_errors=True)
+    if config.use_gcs_thumbnails():
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(_gcs_delete_checkpoints, safe, fingerprint),
+                _GCS_BATCH_TIMEOUT,
+            )
+        except Exception:
+            # Published thumbnails are already valid. Leftover private work is
+            # harmless and can be removed by a later successful run/delete.
+            log.exception("failed pruning thumbnail checkpoints for %s", file_id)
+
+
+async def prune_stale_checkpoints(
+    *,
+    retention_days: int = CHECKPOINT_RETENTION_DAYS,
+    now: datetime | None = None,
+) -> int:
+    """Best-effort retention cleanup for non-public, versioned render work.
+
+    Versions registered by :func:`protect_version` are checked immediately
+    before deletion. Public ``THUMB_ROOT/{file}`` directories and GCS
+    ``{prefix}/{file}/{page}.png`` objects are outside the paths scanned.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(days=max(0, retention_days))
+    try:
+        local_deleted = await asyncio.to_thread(
+            _local_prune_stale_checkpoints, cutoff
+        )
+        gcs_deleted = 0
+        if config.use_gcs_thumbnails():
+            gcs_deleted = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _gcs_prune_stale_checkpoints, cutoff
+                ),
+                _GCS_BATCH_TIMEOUT,
+            )
+        if local_deleted or gcs_deleted:
+            log.info(
+                "pruned stale thumbnail checkpoints local=%d gcs_objects=%d",
+                local_deleted,
+                gcs_deleted,
+            )
+        return local_deleted + gcs_deleted
+    except Exception:
+        log.exception("failed pruning stale thumbnail checkpoints")
+        return 0
+
 
 async def clear_file(file_id: str) -> None:
     """Remove all thumbnails for a file (before re-ingest / on delete).
@@ -124,10 +475,16 @@ async def clear_file(file_id: str) -> None:
     local_dir = THUMB_ROOT / safe
     if local_dir.exists():
         shutil.rmtree(local_dir, ignore_errors=True)
+    for staging in THUMB_ROOT.glob(f"{safe}.staging-*"):
+        shutil.rmtree(staging, ignore_errors=True)
     if config.use_gcs_thumbnails():
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(_gcs_delete_prefix, safe), _GCS_BATCH_TIMEOUT
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(_gcs_delete_checkpoints, safe),
+                _GCS_BATCH_TIMEOUT,
             )
         except Exception:
             log.exception("failed clearing GCS thumbnails for %s", file_id)
@@ -161,22 +518,25 @@ def _local_swap(safe: str, staging_dir: Path) -> None:
         shutil.rmtree(backup, ignore_errors=True)
 
 
-async def publish_file(file_id: str, staging_dir: Path) -> bool:
+async def publish_file(
+    file_id: str, staging_dir: Path, *, fingerprint: str | None = None
+) -> bool:
     """Publish the freshly-rendered PNGs in ``staging_dir`` as the live
     thumbnails for ``file_id`` — two-phase so a failure keeps the old images.
 
     Local backend: atomically swap ``staging_dir`` into ``THUMB_ROOT/safe``; the
     previous dir is only removed once the new one is in place.
-    GCS backend: upload the new pages, then prune stale blobs — old blobs are
-    deleted only after the uploads succeed. The local copies are then dropped so
-    Cloud Run's ephemeral disk doesn't fill up.
+    GCS backend: upload every page into a private generation, then atomically
+    replace a manifest that selects the live generation. Old generations are
+    pruned only after activation.
 
     Resilient by design: a GCS failure/timeout is logged and swallowed (returns
     ``False``) instead of raising, so a misconfigured bucket / missing IAM grant
     can never hang or abort an ingest, and the previous thumbnails (old GCS
-    blobs) stay intact. On GCS failure the new renders are kept locally so
-    same-instance serving via :func:`get` still works as a fallback. Returns
-    ``True`` when the thumbnails are durably published.
+    generation) stay intact. Failed renders remain private in ``staging_dir``;
+    they must never be served as a local fallback because that could mix them
+    with pages from the old active GCS generation. Returns ``True`` when the
+    thumbnails are durably published.
     """
     safe = safe_name(file_id)
     # Hard invariant: never publish an empty render. With no new PNGs the GCS
@@ -190,23 +550,56 @@ async def publish_file(file_id: str, staging_dir: Path) -> bool:
         return False
     if not config.use_gcs_thumbnails():
         try:
-            await asyncio.to_thread(_local_swap, safe, staging_dir)
+            if fingerprint is None:
+                await asyncio.to_thread(_local_swap, safe, staging_dir)
+            else:
+                # Publish a copy so the versioned private work remains
+                # resumable until metadata + embeddings also finish.
+                publish_dir = THUMB_ROOT / f"{safe}.publish"
+                shutil.rmtree(publish_dir, ignore_errors=True)
+                await asyncio.to_thread(shutil.copytree, staging_dir, publish_dir)
+                await asyncio.to_thread(_local_swap, safe, publish_dir)
             return True
         except Exception:
             log.exception("failed publishing local thumbnails for %s", file_id)
             return False
     try:
-        await asyncio.wait_for(
-            asyncio.to_thread(_gcs_publish, safe, staging_dir), _GCS_BATCH_TIMEOUT
-        )
+        generation = uuid.uuid4().hex
+        async with _publish_lock(safe):
+            manifest_generation, prune_candidates = await asyncio.wait_for(
+                asyncio.to_thread(_gcs_publish_snapshot, safe),
+                _GCS_BATCH_TIMEOUT,
+            )
+            pages = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _gcs_upload_version, safe, staging_dir, generation
+                ),
+                _GCS_BATCH_TIMEOUT,
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    _gcs_activate_version,
+                    safe,
+                    generation,
+                    pages,
+                    manifest_generation,
+                ),
+                _GCS_OP_TIMEOUT,
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _gcs_prune_published_versions, prune_candidates
+                    ),
+                    _GCS_BATCH_TIMEOUT,
+                )
+            except Exception:
+                log.exception("failed pruning old GCS thumbnail generations for %s", file_id)
     except Exception:
         log.exception("failed publishing GCS thumbnails for %s", file_id)
-        # Keep the new renders locally so get()'s local fallback can serve them
-        # on this instance; old GCS blobs are left intact (not pruned).
-        try:
-            await asyncio.to_thread(_local_swap, safe, staging_dir)
-        except Exception:
-            log.exception("failed keeping local fallback for %s", file_id)
+        # Keep the complete render private for retry. Never move it into the
+        # local live path: GCS may still serve the old active generation, and a
+        # per-page local fallback would expose a mixed old/new deck.
         return False
     # Published durably to GCS — drop local copies (staging + any old live dir).
     shutil.rmtree(staging_dir, ignore_errors=True)
@@ -217,10 +610,9 @@ async def publish_file(file_id: str, staging_dir: Path) -> bool:
 async def get(file_id: str, page_no: int) -> bytes | None:
     """Return PNG bytes for a slide page, or ``None`` if absent.
 
-    In GCS mode the bucket is the source of truth, but we fall back to a local
-    copy (kept by ``publish_file`` when a publish failed) on a GCS miss/error —
-    so a transient bucket/IAM problem degrades gracefully instead of 404-ing
-    pages that were rendered on this instance.
+    In GCS mode the bucket is the sole source of truth. A miss/error returns
+    ``None`` rather than falling back per page to an uncommitted local render;
+    temporary unavailability is safer than mixing old and new generations.
     """
     safe = safe_name(file_id)
     if config.use_gcs_thumbnails():
@@ -240,7 +632,7 @@ async def get(file_id: str, page_no: int) -> bytes | None:
             data = None
         if data is not None:
             return data
-        # Fall through to the local copy as a best-effort fallback.
+        return None
     p = THUMB_ROOT / safe / f"{page_no}.png"
     if not p.exists():
         return None

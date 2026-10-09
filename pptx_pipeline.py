@@ -5,13 +5,22 @@ import logging
 import re
 import subprocess
 import tempfile
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 log = logging.getLogger("ingest.pptx")
+
+# Small batches amortize pdftoppm process startup without turning the entire
+# document back into one large restart boundary.
+RENDER_BATCH_PAGES = 8
+CHECKPOINT_WORKERS = 4
+MAX_PENDING_CHECKPOINTS = 8
 
 
 @dataclass
@@ -88,11 +97,23 @@ def extract_slides(pptx_path: Path) -> list[SlideExtract]:
     return out
 
 
-def render_thumbnails(pptx_path: Path, out_dir: Path, dpi: int = 110) -> list[Path]:
+def render_thumbnails(
+    pptx_path: Path,
+    out_dir: Path,
+    dpi: int = 110,
+    *,
+    existing_pages: set[int] | None = None,
+    on_page: Callable[[int, Path], None] | None = None,
+) -> list[Path]:
     """Convert PPTX to per-page PNG using LibreOffice + pdftoppm.
 
-    Returns sorted list of PNG paths (one per slide).
+    ``existing_pages`` are already-rendered checkpoints in ``out_dir`` and are
+    not regenerated. ``on_page`` runs after each new page is complete, allowing
+    the caller to persist it before the next page starts.
+
+    Returns the complete sorted list of PNG paths (one per slide).
     """
+    started = time.monotonic()
     out_dir.mkdir(parents=True, exist_ok=True)
     log.info("render start: PPTX->PDF %s (dpi=%d)", pptx_path.name, dpi)
     with tempfile.TemporaryDirectory(prefix="pptx_") as tmp:
@@ -132,30 +153,101 @@ def render_thumbnails(pptx_path: Path, out_dir: Path, dpi: int = 110) -> list[Pa
             raise RuntimeError("LibreOffice produced no PDF output")
         pdf = pdfs[0]
         log.info("render: PDF->PNG %s", pptx_path.name)
-        # 2) PDF → PNG (one per page). Write directly into out_dir (not the temp
-        # dir) so a caller can observe pages landing on disk for live progress —
-        # the PPTX→PDF (soffice) step above produces no intermediate files, so
-        # the count staying at 0 during it cleanly signals "still converting".
-        page_prefix = out_dir / "page"
-        r2 = subprocess.run(
-            ["pdftoppm", "-png", "-r", str(dpi), str(pdf), str(page_prefix)],
-            capture_output=True,
-            text=True,
-            timeout=240,
-        )
-        if r2.returncode != 0:
-            raise RuntimeError(
-                f"pdftoppm failed: {r2.stderr or r2.stdout}"
+        known = set(existing_pages or ())
+        page_count = len(Presentation(str(pptx_path)).slides)
+        missing = [
+            page_no
+            for page_no in range(1, page_count + 1)
+            if not (page_no in known and (out_dir / f"{page_no}.png").is_file())
+        ]
+        batches: list[list[int]] = []
+        for page_no in missing:
+            if (
+                not batches
+                or page_no != batches[-1][-1] + 1
+                or len(batches[-1]) >= RENDER_BATCH_PAGES
+            ):
+                batches.append([])
+            batches[-1].append(page_no)
+
+        executor = (
+            ThreadPoolExecutor(
+                max_workers=CHECKPOINT_WORKERS,
+                thread_name_prefix="thumb-checkpoint",
             )
-        pages = sorted(out_dir.glob("page-*.png"))
-        if not pages:
-            raise RuntimeError("pdftoppm produced no PNG output")
-        # Rename in place to 1.png, 2.png, ... (same dir, so the total *.png
-        # count stays stable while a progress poller is watching).
-        final: list[Path] = []
-        for i, p in enumerate(pages, start=1):
-            target = out_dir / f"{i}.png"
-            p.rename(target)
-            final.append(target)
-        log.info("render done: %s -> %d pages", pptx_path.name, len(final))
+            if on_page is not None
+            else None
+        )
+        pending: list[Future] = []
+
+        def checkpoint(page_no: int, target: Path) -> None:
+            if executor is None or on_page is None:
+                return
+            pending.append(executor.submit(on_page, page_no, target))
+            # Bound queued uploads and surface callback failures promptly.
+            if len(pending) >= MAX_PENDING_CHECKPOINTS:
+                pending.pop(0).result()
+
+        try:
+            for batch_index, page_nos in enumerate(batches):
+                first, last = page_nos[0], page_nos[-1]
+                batch_dir = tmp_dir / f"render-{batch_index}"
+                batch_dir.mkdir()
+                page_prefix = batch_dir / "page"
+                r2 = subprocess.run(
+                    [
+                        "pdftoppm", "-png",
+                        "-f", str(first), "-l", str(last),
+                        "-r", str(dpi), str(pdf), str(page_prefix),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=240,
+                )
+                if r2.returncode != 0:
+                    raise RuntimeError(
+                        f"pdftoppm failed on pages {first}-{last}: "
+                        f"{r2.stderr or r2.stdout}"
+                    )
+                rendered = sorted(
+                    batch_dir.glob("page-*.png"),
+                    key=lambda path: int(path.stem.rsplit("-", 1)[-1]),
+                )
+                rendered_page_nos = [
+                    int(path.stem.rsplit("-", 1)[-1]) for path in rendered
+                ]
+                if rendered_page_nos != page_nos:
+                    raise RuntimeError(
+                        f"pdftoppm produced pages {rendered_page_nos} for "
+                        f"requested pages {page_nos}"
+                    )
+                for page_no, rendered_path in zip(page_nos, rendered):
+                    target = out_dir / f"{page_no}.png"
+                    rendered_path.replace(target)
+                    checkpoint(page_no, target)
+
+            for future in pending:
+                future.result()
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True, cancel_futures=False)
+
+        final = [out_dir / f"{page_no}.png" for page_no in range(1, page_count + 1)]
+        missing_outputs = [path for path in final if not path.is_file()]
+        if missing_outputs:
+            raise RuntimeError(
+                f"thumbnail render incomplete: {len(missing_outputs)} pages missing"
+            )
+        elapsed = time.monotonic() - started
+        log.info(
+            "render done: %s -> %d pages (%d reused, %d rendered, %d batches, "
+            "%.2fs, %.2f pages/s)",
+            pptx_path.name,
+            len(final),
+            page_count - len(missing),
+            len(missing),
+            len(batches),
+            elapsed,
+            len(missing) / elapsed if elapsed else 0.0,
+        )
         return final

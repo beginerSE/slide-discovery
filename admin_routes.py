@@ -660,8 +660,9 @@ async def retry_drive_file(
     row = await session.get(DriveFile, drive_file_id)
     if not row:
         raise HTTPException(status_code=404, detail="not found")
+    force = True if body is None or body.force is None else body.force
     started = await schedule_ingest_background(
-        only_ids=[row.id], force=True, kind="retry", actor_label=actor_label
+        only_ids=[row.id], force=force, kind="retry", actor_label=actor_label
     )
     return {"started": started, "jobs": await list_jobs()}
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import shutil
 import tempfile
@@ -27,7 +28,6 @@ from pptx_pipeline import SlideExtract, extract_slides, render_thumbnails
 from series import extract_doc_date
 
 import thumbnail_store
-from thumbnail_store import THUMB_ROOT
 
 log = logging.getLogger("ingest")
 
@@ -37,7 +37,6 @@ log = logging.getLogger("ingest")
 # (Cloud Run: --min-instances=1 --max-instances=1 --no-cpu-throttling).
 _ACTIVE_FILES: set[str] = set()
 _ACTIVE_LOCK = asyncio.Lock()
-
 # Serializes single-flight scheduling so the "is one already running?" check
 # and the job-row reservation happen atomically (within this process).
 _SCHEDULE_LOCK = asyncio.Lock()
@@ -260,11 +259,27 @@ def _file_fingerprint(etag: str | None, size: int | None) -> str:
     value is stored on each ``Slide`` so a resumed ingest can tell an
     already-done page apart from a stale one.
     """
+    if etag and etag.startswith("sha256:"):
+        return etag
     if etag:
         return f"etag:{etag}"
     if size is not None:
         return f"size:{size}"
     return ""
+
+
+def _thumbnail_fingerprint(path: Path) -> str:
+    """Content-derived version used only for thumbnail checkpoints.
+
+    Drive's public download mode sometimes exposes no etag, leaving file size
+    as the database resume fallback. A SHA-256 of the bytes prevents two
+    same-sized revisions from ever sharing thumbnail work.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _page_action(
@@ -300,6 +315,9 @@ async def _render_thumbs_tracked(
     thumb_out: Path,
     tracker: JobTracker,
     total: int | None,
+    *,
+    existing_pages: set[int] | None = None,
+    on_page=None,
 ) -> list[Path]:
     """Render PPTX thumbnails in a worker thread while keeping the job's stage
     live, so a large deck does not look frozen in the UI.
@@ -348,7 +366,17 @@ async def _render_thumbs_tracked(
 
     poller = asyncio.create_task(_poll())
     try:
-        return await asyncio.to_thread(render_thumbnails, src_path, thumb_out)
+        if existing_pages is None and on_page is None:
+            # Keep the original two-argument call shape for simple callers and
+            # test doubles that do not need checkpoint-aware rendering.
+            return await asyncio.to_thread(render_thumbnails, src_path, thumb_out)
+        return await asyncio.to_thread(
+            render_thumbnails,
+            src_path,
+            thumb_out,
+            existing_pages=existing_pages,
+            on_page=on_page,
+        )
     finally:
         stop.set()
         poller.cancel()
@@ -483,12 +511,21 @@ async def _ingest_one(
         await session.commit()
 
     tmp = Path(tempfile.mkdtemp(prefix="drv_"))
+    active_thumbnail_version: tuple[str, str] | None = None
     try:
         dl: DownloadResult = await download(file_id, tmp)
         # Filename is known after download — show it in the progress UI.
         await tracker.set_current_file(dl.file_name or file_id)
         eff_name = drive_file.display_name or dl.file_name
-        fingerprint = _file_fingerprint(dl.etag, dl.size)
+        thumbnail_fingerprint = await asyncio.to_thread(
+            _thumbnail_fingerprint, dl.path
+        )
+        active_thumbnail_version = (file_id, thumbnail_fingerprint)
+        thumbnail_store.protect_version(*active_thumbnail_version)
+        await thumbnail_store.prune_stale_checkpoints()
+        # The downloaded bytes are authoritative. Drive public links may omit
+        # etag, and size alone cannot distinguish same-sized revisions.
+        fingerprint = thumbnail_fingerprint
         # File-level meeting date: prefer the date captured at add-time, else
         # parse the now-known downloaded filename (public-mode direct links
         # have no name pre-ingest, so this is the first chance to date them).
@@ -556,14 +593,27 @@ async def _ingest_one(
         log.info("ingest extracted file_id=%s pages=%d", file_id, n_pages)
         page_nos = {ex.page_no for ex in extracts}
         await tracker.set_stage("サムネイル生成中", page=0, total=n_pages)
-        # Two-phase publish: render into a staging dir (a sibling of the live
-        # dir, so it shares THUMB_ROOT's filesystem for an atomic rename) and
-        # only swap it in AFTER a successful render+publish. A mid-render failure
-        # therefore never wipes the file's existing thumbnails.
-        thumb_out = THUMB_ROOT / f"{_safe_name(file_id)}.staging"
-        shutil.rmtree(thumb_out, ignore_errors=True)
+        # Restore non-public page checkpoints for this exact content version.
+        # Old-version checkpoints live under a different fingerprint key and
+        # therefore can never be mistaken for pages of the current deck.
+        thumb_out, rendered_pages = await thumbnail_store.prepare_render(
+            file_id, thumbnail_fingerprint, n_pages
+        )
+        if rendered_pages:
+            await tracker.set_stage(
+                "サムネイル生成中（続きから再開）",
+                page=len(rendered_pages),
+                total=n_pages,
+            )
         thumb_paths = await _render_thumbs_tracked(
-            dl.path, thumb_out, tracker, total=n_pages
+            dl.path,
+            thumb_out,
+            tracker,
+            total=n_pages,
+            existing_pages=rendered_pages,
+            on_page=lambda page_no, path: thumbnail_store.checkpoint_page(
+                file_id, thumbnail_fingerprint, page_no, path
+            ),
         )
         log.info(
             "ingest rendered thumbnails file_id=%s count=%d",
@@ -650,7 +700,9 @@ async def _ingest_one(
         # Gemini no longer needs the local PNGs — publish them to the active
         # backend (atomic swap locally / upload+prune on GCS), replacing the old
         # thumbnails only now that the render succeeded.
-        published = await thumbnail_store.publish_file(file_id, thumb_out)
+        published = await thumbnail_store.publish_file(
+            file_id, thumb_out, fingerprint=thumbnail_fingerprint
+        )
         log.info(
             "ingest thumbnails published file_id=%s ok=%s pages=%d backend=%s",
             file_id, published, len(thumb_paths),
@@ -785,7 +837,10 @@ async def _ingest_one(
                 if complete:
                     db_row.status = "ready"
                     db_row.last_size = dl.size
-                    db_row.last_etag = dl.etag
+                    # Store the content hash in the existing version-marker
+                    # field. Legacy raw etag values safely trigger one full
+                    # refresh before moving to hash-based identity.
+                    db_row.last_etag = fingerprint
                     db_row.last_ingested_at = now
                     db_row.last_error = None
                 else:
@@ -806,6 +861,10 @@ async def _ingest_one(
                 src.folder_id or "",
                 src.folder_name or "",
                 src.doc_date or file_doc_date,
+            )
+        if complete and published:
+            await thumbnail_store.clear_render_checkpoints(
+                file_id, thumbnail_fingerprint
             )
         log.info(
             "ingested %s -> %d slides (recomputed=%d reused=%d missing_embed=%d)",
@@ -843,6 +902,8 @@ async def _ingest_one(
                 await session.commit()
         raise
     finally:
+        if active_thumbnail_version is not None:
+            thumbnail_store.unprotect_version(*active_thumbnail_version)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -1145,6 +1206,7 @@ async def _regen_thumbnails_one(
     )
 
     tmp = Path(tempfile.mkdtemp(prefix="thumb_"))
+    active_thumbnail_version: tuple[str, str] | None = None
     try:
         dl: DownloadResult = await download(file_id, tmp)
         await tracker.set_current_file(dl.file_name or file_id)
@@ -1154,7 +1216,7 @@ async def _regen_thumbnails_one(
         # fully ingested, or its content changed since the last ingest, the
         # stored metadata/embeddings would no longer match the new images — so
         # refuse and tell the admin to run a full re-ingest instead.
-        current_fp = _file_fingerprint(dl.etag, dl.size)
+        current_fp = await asyncio.to_thread(_thumbnail_fingerprint, dl.path)
         stored_fp = _file_fingerprint(drive_file.last_etag, drive_file.last_size)
         if drive_file.last_ingested_at is None or current_fp != stored_fp:
             raise RuntimeError(
@@ -1162,13 +1224,32 @@ async def _regen_thumbnails_one(
                 "サムネイル再生成ではなく「再取り込み」を実行してください"
             )
 
-        await tracker.set_stage("サムネイル生成中")
-        # Two-phase publish: render into a staging dir and swap it in only after
-        # a successful render+publish, so a failed regen keeps the old images.
-        thumb_out = THUMB_ROOT / f"{_safe_name(file_id)}.staging"
-        shutil.rmtree(thumb_out, ignore_errors=True)
+        thumbnail_fingerprint = await asyncio.to_thread(
+            _thumbnail_fingerprint, dl.path
+        )
+        active_thumbnail_version = (file_id, thumbnail_fingerprint)
+        thumbnail_store.protect_version(*active_thumbnail_version)
+        await thumbnail_store.prune_stale_checkpoints()
+        thumb_out, rendered_pages = await thumbnail_store.prepare_render(
+            file_id, thumbnail_fingerprint, None
+        )
+        await tracker.set_stage(
+            "サムネイル生成中"
+            + ("（続きから再開）" if rendered_pages else ""),
+            page=len(rendered_pages),
+            total=None,
+        )
+        # Two-phase publish: version-matched checkpoints stay non-public until
+        # every page exists and the complete set can safely replace the live set.
         thumb_paths = await _render_thumbs_tracked(
-            dl.path, thumb_out, tracker, total=None
+            dl.path,
+            thumb_out,
+            tracker,
+            total=None,
+            existing_pages=rendered_pages,
+            on_page=lambda page_no, path: thumbnail_store.checkpoint_page(
+                file_id, thumbnail_fingerprint, page_no, path
+            ),
         )
         n_pages = len(thumb_paths)
         log.info(
@@ -1176,7 +1257,9 @@ async def _regen_thumbnails_one(
         )
 
         await tracker.set_stage("サムネイル保存中", page=0, total=n_pages)
-        published = await thumbnail_store.publish_file(file_id, thumb_out)
+        published = await thumbnail_store.publish_file(
+            file_id, thumb_out, fingerprint=thumbnail_fingerprint
+        )
         log.info(
             "thumbnail regen published file_id=%s ok=%s pages=%d backend=%s",
             file_id, published, n_pages,
@@ -1198,10 +1281,16 @@ async def _regen_thumbnails_one(
                     if s.thumbnail_path != url:
                         s.thumbnail_path = url
             await session.commit()
+        if published:
+            await thumbnail_store.clear_render_checkpoints(
+                file_id, thumbnail_fingerprint
+            )
         await tracker.set_stage(None)
         log.info("regenerated %d thumbnails for %s", n_pages, file_id)
         return n_pages
     finally:
+        if active_thumbnail_version is not None:
+            thumbnail_store.unprotect_version(*active_thumbnail_version)
         shutil.rmtree(tmp, ignore_errors=True)
 
 

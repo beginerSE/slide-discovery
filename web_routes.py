@@ -1241,7 +1241,11 @@ async def ui_admin_add_resolve(request: Request):
 
 
 @web_router.post("/ui/admin/files/{drive_file_id}/retry", response_class=HTMLResponse)
-async def ui_admin_retry(request: Request, drive_file_id: int):
+async def ui_admin_retry(
+    request: Request,
+    drive_file_id: int,
+    force: bool = False,
+):
     from admin_routes import RetryBody, retry_drive_file
     from ingest import any_running
 
@@ -1254,12 +1258,16 @@ async def ui_admin_retry(request: Request, drive_file_id: int):
         try:
             result = await retry_drive_file(
                 drive_file_id,
-                RetryBody(force=True),
+                RetryBody(force=force),
                 session=session,
                 actor_label=(user.display_name or user.email),
             )
             if result.get("started"):
-                flash = "再取り込みを開始しました"
+                flash = (
+                    "最初から再解析を開始しました"
+                    if force
+                    else "未完了部分の続きから再開しました"
+                )
             else:
                 flash = _JOBS_FULL_MESSAGE
                 flash_error = True

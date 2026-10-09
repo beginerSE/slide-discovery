@@ -177,10 +177,10 @@ class Slide(Base):
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(EMBED_DIM), nullable=True
     )
-    # Content version (etag, else "size:<n>") of the source file this slide was
-    # extracted from. Lets a resumed ingest tell "already-done page for the
-    # current file content" (reuse) apart from "stale page from an older
-    # version" (must recompute). NULL on legacy rows ingested before resume.
+    # Content version (SHA-256 for Drive files; source revision for other
+    # backends) this slide was extracted from. Lets a resumed ingest tell
+    # "already-done page for the current file content" (reuse) apart from a
+    # stale page from an older version. NULL on legacy rows.
     source_fingerprint: Mapped[str | None] = mapped_column(String, nullable=True)
     # Origin of this row: "pptx" (Drive-ingested PowerPoint slide) or
     # "confluence" (Confluence Cloud page). Lets search/UI distinguish sources.
